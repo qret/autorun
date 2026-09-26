@@ -32,6 +32,7 @@
 #include "launcher_catalog.h"
 #include "launcher_list.h"
 #include "launcher_settings.h"
+#include "gears_startup.h"
 #include "fex_options.h"
 #include "dxvk_options.h"
 #include "input_profile.h"
@@ -1702,6 +1703,40 @@ static HANDLE runtime_open_std_file( const char *path, ACCESS_MASK access, ULONG
     return handle;
 }
 
+static int runtime_gears_startup;
+
+static NTSTATUS runtime_apply_startup_compat( const char *target, void *module, SIZE_T size )
+{
+    const IMAGE_NT_HEADERS32 *nt = (const void *)((const char *)module + ((IMAGE_DOS_HEADER *)module)->e_lfanew);
+    const IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION( nt );
+    void *address, *protect_base;
+    size_t call_rva = 0;
+    SIZE_T protect_size = sizeof(gears_startup_replacement);
+    ULONG old_protect, unused;
+    NTSTATUS status;
+
+    if (!gears_startup_target( target, nt->FileHeader.Machine )) return STATUS_SUCCESS;
+    /* The guest loader applies image relocations later. */
+    for (unsigned int i = 0; i < nt->FileHeader.NumberOfSections; i++)
+        if ((section[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) &&
+            !gears_startup_scan( module, size, nt->OptionalHeader.ImageBase, section[i].VirtualAddress,
+                                 section[i].Misc.VirtualSize, &call_rva )) return STATUS_SUCCESS;
+    if (!call_rva) return STATUS_SUCCESS;
+
+    protect_base = address = (char *)module + call_rva;
+    status = NtProtectVirtualMemory( NtCurrentProcess(), &protect_base, &protect_size,
+                                     PAGE_READWRITE, &old_protect );
+    if (status) return status;
+    memcpy( address, gears_startup_replacement, sizeof(gears_startup_replacement) );
+    status = NtProtectVirtualMemory( NtCurrentProcess(), &protect_base, &protect_size, old_protect, &unused );
+    if (status) return status;
+    status = NtFlushInstructionCache( NtCurrentProcess(), address, sizeof(gears_startup_replacement) );
+    if (status) return status;
+    runtime_gears_startup = 1;
+    log_line( "[COMPAT] Gears of War: direct startup enabled" );
+    return STATUS_SUCCESS;
+}
+
 static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *target,
                                                                    UNICODE_STRING *main_nt_name,
                                                                    char *dos_path, size_t dos_path_size )
@@ -1780,7 +1815,8 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
             launcher_sibling_path( target, ".box64.txt", wine_nx_box64_options_path, 512 );
     }
 
-    if (!launcher_command_line( dos_path, "", cmdline, sizeof(cmdline) )) return NULL;
+    if (!launcher_command_line( dos_path, runtime_gears_startup ? GEARS_STARTUP_ARGS : "",
+                                cmdline, sizeof(cmdline) )) return NULL;
     cmdline_str = cmdline;
     if (target[1] != ':' && launcher_args_path( target, args_path, sizeof(args_path) ) &&
         read_first_line( args_path, args_buf, sizeof(args_buf) ) &&
@@ -4362,6 +4398,11 @@ int main( int argc, char **argv )
     if (!teb || NtCurrentTeb() != teb || !teb->Peb)
     {
         log_line( "[FAIL] virtual_alloc_first_teb" );
+        park_forever();
+    }
+    if ((status = runtime_apply_startup_compat( target, module, view_size )))
+    {
+        log_line( "[FAIL] startup compatibility status=%08x", status );
         park_forever();
     }
     /* Upstream's start_main_thread does this; without it the PEB (and the
