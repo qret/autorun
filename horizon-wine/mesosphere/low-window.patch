@@ -61,6 +61,19 @@ index 6992281..39f0dac 100644
  
          /* Note that we've updated the table (since we created it). */
          this->NoteUpdated();
+diff --git a/libraries/libmesosphere/source/board/nintendo/nx/kern_k_system_control.cpp b/libraries/libmesosphere/source/board/nintendo/nx/kern_k_system_control.cpp
+index bb7581c..e5078f9 100644
+--- a/libraries/libmesosphere/source/board/nintendo/nx/kern_k_system_control.cpp
++++ b/libraries/libmesosphere/source/board/nintendo/nx/kern_k_system_control.cpp
+@@ -313,7 +313,7 @@ namespace ams::kern::board::nintendo::nx {
+     }
+ 
+     bool KSystemControl::Init::ShouldIncreaseThreadResourceLimit() {
+-        return GetKernelConfigurationForInit().Get<smc::KernelConfiguration::IncreaseThreadResourceLimit>();
++        return true;
+     }
+ 
+     size_t KSystemControl::Init::GetApplicationPoolSize() {
 diff --git a/libraries/libmesosphere/source/kern_k_page_table_base.cpp b/libraries/libmesosphere/source/kern_k_page_table_base.cpp
 index 5d34dbe..0c00f86 100644
 --- a/libraries/libmesosphere/source/kern_k_page_table_base.cpp

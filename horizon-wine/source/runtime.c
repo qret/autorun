@@ -3749,6 +3749,13 @@ static unsigned long long runtime_title_id( void )
     return id;
 }
 
+static void runtime_boost_thread_limit(void)
+{
+    if (appletGetAppletType() != AppletType_Application || R_FAILED(pmshellInitialize())) return;
+    pmshellBoostApplicationThreadResourceLimit();
+    pmshellExit();
+}
+
 int main( int argc, char **argv )
 {
     char target[512] = DEFAULT_TARGET;
@@ -4221,6 +4228,7 @@ int main( int argc, char **argv )
             runtime_fex = 0;
         }
     }
+    runtime_boost_thread_limit();
     log_line( "[SYNC] %s", horizon_fast_sync_enabled ? "Horizon queued waits" : "Standard" );
     wine_nx_thread_configure_cores( runtime_four_cores );
     log_line( "[SDCACHE] %s", sd_cache ? "sdmc reads cached: 128 KB chunks, 8 per file, 32 to 192 MB in all"
