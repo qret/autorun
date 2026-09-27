@@ -33,6 +33,7 @@
 #include "launcher_list.h"
 #include "launcher_settings.h"
 #include "gears_startup.h"
+#include "ground_zeroes_startup.h"
 #include "fex_options.h"
 #include "dxvk_options.h"
 #include "input_profile.h"
@@ -1705,35 +1706,56 @@ static HANDLE runtime_open_std_file( const char *path, ACCESS_MASK access, ULONG
 
 static int runtime_gears_startup;
 
+static NTSTATUS runtime_patch_image( void *module, size_t rva, const void *data, SIZE_T size )
+{
+    void *address = (char *)module + rva, *protect_base = address;
+    SIZE_T protect_size = size;
+    ULONG old_protect, unused;
+    NTSTATUS status;
+
+    status = NtProtectVirtualMemory( NtCurrentProcess(), &protect_base, &protect_size,
+                                     PAGE_READWRITE, &old_protect );
+    if (status) return status;
+    memcpy( address, data, size );
+    status = NtProtectVirtualMemory( NtCurrentProcess(), &protect_base, &protect_size, old_protect, &unused );
+    if (status) return status;
+    return NtFlushInstructionCache( NtCurrentProcess(), address, size );
+}
+
 static NTSTATUS runtime_apply_startup_compat( const char *target, void *module, SIZE_T size )
 {
     const IMAGE_NT_HEADERS32 *nt = (const void *)((const char *)module + ((IMAGE_DOS_HEADER *)module)->e_lfanew);
     const IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION( nt );
-    void *address, *protect_base;
     size_t call_rva = 0;
-    SIZE_T protect_size = sizeof(gears_startup_replacement);
-    ULONG old_protect, unused;
+    const unsigned char *replacement = gears_startup_replacement;
+    SIZE_T replacement_size = sizeof(gears_startup_replacement);
     NTSTATUS status;
+    int gears = gears_startup_target( target, nt->FileHeader.Machine );
+    int ground_zeroes = ground_zeroes_startup_target( target, nt->FileHeader.Machine );
 
-    if (!gears_startup_target( target, nt->FileHeader.Machine )) return STATUS_SUCCESS;
+    if (!gears && !ground_zeroes) return STATUS_SUCCESS;
     /* The guest loader applies image relocations later. */
     for (unsigned int i = 0; i < nt->FileHeader.NumberOfSections; i++)
-        if ((section[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) &&
-            !gears_startup_scan( module, size, nt->OptionalHeader.ImageBase, section[i].VirtualAddress,
-                                 section[i].Misc.VirtualSize, &call_rva )) return STATUS_SUCCESS;
+    {
+        if (!(section[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        if (gears && !gears_startup_scan( module, size, nt->OptionalHeader.ImageBase,
+                                         section[i].VirtualAddress, section[i].Misc.VirtualSize, &call_rva ))
+            return STATUS_SUCCESS;
+        if (ground_zeroes && !ground_zeroes_startup_scan( module, size, section[i].VirtualAddress,
+                                                         section[i].Misc.VirtualSize, &call_rva ))
+            return STATUS_SUCCESS;
+    }
     if (!call_rva) return STATUS_SUCCESS;
 
-    protect_base = address = (char *)module + call_rva;
-    status = NtProtectVirtualMemory( NtCurrentProcess(), &protect_base, &protect_size,
-                                     PAGE_READWRITE, &old_protect );
+    if (ground_zeroes)
+    {
+        replacement = ground_zeroes_startup_replacement;
+        replacement_size = sizeof(ground_zeroes_startup_replacement);
+    }
+    status = runtime_patch_image( module, call_rva, replacement, replacement_size );
     if (status) return status;
-    memcpy( address, gears_startup_replacement, sizeof(gears_startup_replacement) );
-    status = NtProtectVirtualMemory( NtCurrentProcess(), &protect_base, &protect_size, old_protect, &unused );
-    if (status) return status;
-    status = NtFlushInstructionCache( NtCurrentProcess(), address, sizeof(gears_startup_replacement) );
-    if (status) return status;
-    runtime_gears_startup = 1;
-    log_line( "[COMPAT] Gears of War: direct startup enabled" );
+    runtime_gears_startup = gears;
+    log_line( "[COMPAT] %s: direct startup enabled", gears ? "Gears of War" : "Ground Zeroes" );
     return STATUS_SUCCESS;
 }
 
