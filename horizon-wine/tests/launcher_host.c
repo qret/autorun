@@ -266,7 +266,7 @@ static int machine_of( const char *path, unsigned short *machine )
         fread( nt, 1, sizeof(nt), file ) == sizeof(nt) && !memcmp( nt, "PE\0\0", 4 ))
     {
         *machine = nt[4] | (nt[5] << 8);
-        ok = *machine == 0x014c || *machine == 0xaa64;
+        ok = *machine == 0x014c || *machine == 0x8664 || *machine == 0xaa64;
     }
     fclose( file );
     return !ok;

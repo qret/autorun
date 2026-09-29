@@ -48,6 +48,7 @@
 #include "launcher_setup.h"
 #include "launcher_graphics.h"
 #include "launcher_dxvk.h"
+#include "launcher_game_settings.h"
 #include "autorun_install.h"
 #include "steamgriddb.h"
 #include "dxvk_releases.h"
@@ -2409,20 +2410,22 @@ enum program_section
     SECTION_FRAME_GENERATION,
 #endif
     SECTION_DIAGNOSTICS,
-    SECTION_LIBRARY
+    SECTION_LIBRARY,
+    SECTION_GAME
 };
 
-static int program_menu( struct launcher *l, struct program *p, char *target, size_t size )
+static int program_menu_run( struct launcher *l, struct program *p, char *target, size_t size,
+                             struct launcher_game_settings *game )
 {
     static const char *const sections[] = { "General", "Emulation", "Graphics", "Controls",
 #ifdef WINE_NX_LSFG
                                             "Frame Generation",
 #endif
-                                            "Diagnostics", "Library" };
+                                            "Diagnostics", "Library", "Game Settings" };
     /* Kept between openings, so a game returns to the section it was left in. */
     static int section;
-    struct ui_row rows[PROGRAM_ROWS];
-    int ids[PROGRAM_ROWS], count, id, i;
+    struct ui_row rows[PROGRAM_ROWS + GAME_SETTINGS_MAX_ROWS];
+    int ids[PROGRAM_ROWS + GAME_SETTINGS_MAX_ROWS], count, id, i;
     struct ui_list list = {0};
     struct ui *ui = &l->ui;
     char path[520], dir[512], line[896], global_line[896], name[128], buffer[64];
@@ -2727,8 +2730,10 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         }
 #undef ADD_ROW
 
+        launcher_game_settings_load( game, l->options->runtime_dir, p->path, p->machine );
+        count += launcher_game_settings_rows( game, rows + count, ids + count, SECTION_GAME, PROGRAM_ROWS );
         action = ui_settings_run( ui, &list, "Game Settings", p->title, sections,
-                                  sizeof(sections) / sizeof(sections[0]), rows, count, 1, &section );
+                                  sizeof(sections) / sizeof(sections[0]) - !game->profile, rows, count, 1, &section );
         if (action == UI_ACTION_BACK || action == UI_ACTION_QUIT) return 0;
         /* The screen shows one section at a time, so the row it chose is the
          * selection counted within that section. */
@@ -2740,6 +2745,11 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             launcher_input_edit( ui, &list, id - ROW_INPUT, action, l->options->runtime_dir,
                                  p->path, p->title, l->options->swkbd_auto );
             load_program_settings( l, p );
+            continue;
+        }
+        if (id >= PROGRAM_ROWS)
+        {
+            launcher_game_settings_action( game, l->options->runtime_dir, ui, &list, id - PROGRAM_ROWS, action );
             continue;
         }
         switch (id)
@@ -3117,6 +3127,14 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             break;
         }
     }
+}
+
+static int program_menu( struct launcher *l, struct program *p, char *target, size_t size )
+{
+    struct launcher_game_settings game = {0};
+    int result = program_menu_run( l, p, target, size, &game );
+    game_settings_close( game.settings );
+    return result;
 }
 
 /***********************************************************************

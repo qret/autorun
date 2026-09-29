@@ -1,0 +1,312 @@
+#include <ctype.h>
+#include <errno.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "game_settings.h"
+#include "games/fallout4.h"
+
+#define INI_LIMIT 65536
+
+struct game_settings
+{
+    const struct game_settings_profile *profile;
+    char path[1024];
+    char text[INI_LIMIT + 1];
+    size_t size;
+    int dirty;
+};
+
+static int span_equal( const char *text, size_t begin, size_t end, const char *value )
+{
+    while (begin < end && isspace( (unsigned char)text[begin] )) begin++;
+    while (end > begin && isspace( (unsigned char)text[end - 1] )) end--;
+    return end - begin == strlen( value ) && !strncasecmp( text + begin, value, end - begin );
+}
+
+static int ini_find( const struct game_settings *settings, const char *section, const char *key,
+                     size_t *begin, size_t *end, size_t *value, size_t *insert )
+{
+    size_t pos = 0;
+    int match = 0;
+
+    *insert = SIZE_MAX;
+    while (pos < settings->size)
+    {
+        size_t start = pos, p, stop;
+        const char *equal, *bracket;
+
+        while (pos < settings->size && settings->text[pos] != '\n') pos++;
+        stop = pos;
+        if (pos < settings->size) pos++;
+        p = start;
+        if (!p && stop >= 3 && !memcmp( settings->text, "\xef\xbb\xbf", 3 )) p += 3;
+        while (p < stop && isspace( (unsigned char)settings->text[p] )) p++;
+        if (p == stop || settings->text[p] == ';' || settings->text[p] == '#') continue;
+        if (settings->text[p] == '[')
+        {
+            bracket = memchr( settings->text + p, ']', stop - p );
+            match = bracket && span_equal( settings->text, p + 1, bracket - settings->text, section );
+        }
+        else if (match && (equal = memchr( settings->text + p, '=', stop - p )) &&
+                 span_equal( settings->text, p, equal - settings->text, key ))
+        {
+            *begin = start;
+            *end = pos;
+            *value = equal - settings->text + 1;
+            return 1;
+        }
+        if (match) *insert = pos;
+    }
+    return 0;
+}
+
+static int ini_get( const struct game_settings *settings, const char *section, const char *key,
+                    char *out, size_t size )
+{
+    size_t begin, end, value, insert;
+
+    if (!size) return 0;
+    *out = 0;
+    if (!ini_find( settings, section, key, &begin, &end, &value, &insert )) return 0;
+    while (value < end && isspace( (unsigned char)settings->text[value] )) value++;
+    while (end > value && isspace( (unsigned char)settings->text[end - 1] )) end--;
+    if (end - value >= size) return 0;
+    memcpy( out, settings->text + value, end - value );
+    out[end - value] = 0;
+    return 1;
+}
+
+static int ini_replace( struct game_settings *settings, size_t begin, size_t end, const char *text )
+{
+    size_t length = strlen( text );
+
+    if (length > INI_LIMIT - settings->size + (end - begin)) return 0;
+    memmove( settings->text + begin + length, settings->text + end, settings->size - end + 1 );
+    memcpy( settings->text + begin, text, length );
+    settings->size = settings->size - (end - begin) + length;
+    settings->dirty = 1;
+    return 1;
+}
+
+static int ini_set( struct game_settings *settings, const char *section, const char *key, const char *value )
+{
+    size_t begin, end, old_value, insert;
+    char line[256];
+    int n;
+
+    /* Collapse duplicate keys, including repeated sections. */
+    while (ini_find( settings, section, key, &begin, &end, &old_value, &insert ))
+    {
+        if (!ini_replace( settings, begin, end, "" )) return 0;
+    }
+    ini_find( settings, section, key, &begin, &end, &old_value, &insert );
+    if (insert == SIZE_MAX)
+    {
+        insert = settings->size;
+        n = snprintf( line, sizeof(line), "%s[%s]\r\n",
+                      insert && settings->text[insert - 1] != '\n' ? "\r\n" : "", section );
+        if (n < 0 || (size_t)n >= sizeof(line) || !ini_replace( settings, insert, insert, line )) return 0;
+        insert = settings->size;
+    }
+    n = snprintf( line, sizeof(line), "%s%s=%s\r\n",
+                  insert && settings->text[insert - 1] != '\n' ? "\r\n" : "", key, value );
+    return n >= 0 && (size_t)n < sizeof(line) && ini_replace( settings, insert, insert, line );
+}
+
+const struct game_settings_profile *game_settings_find( const char *target, uint16_t machine )
+{
+    static const struct game_settings_profile *const profiles[] = { &fallout4_profile };
+    const char *name = target;
+
+    for (const char *p = target; *p; p++) if (*p == '/' || *p == '\\') name = p + 1;
+    for (unsigned int i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++)
+        if (profiles[i]->machine == machine && !strcasecmp( name, profiles[i]->executable )) return profiles[i];
+    return NULL;
+}
+
+struct game_settings *game_settings_open( const char *root, const struct game_settings_profile *profile )
+{
+    struct game_settings *settings;
+    char marker[32], backup[1100];
+    FILE *file;
+    int ok = 1;
+
+    if (!profile || !profile->preset_count || profile->preset_count > 4 ||
+        profile->count > GAME_SETTINGS_MAX_ROWS - 1) return NULL;
+    if (!(settings = calloc( 1, sizeof(*settings) ))) return NULL;
+    settings->profile = profile;
+    if ((size_t)snprintf( settings->path, sizeof(settings->path), "%s/%s", root, profile->path ) >= sizeof(settings->path))
+        goto failed;
+    snprintf( backup, sizeof(backup), "%s.autorun-old", settings->path );
+    if (access( settings->path, F_OK ) && errno == ENOENT && !access( backup, F_OK ))
+        if (rename( backup, settings->path )) goto failed;
+    file = fopen( settings->path, "rb" );
+    if (!file && errno != ENOENT) goto failed;
+    if (file)
+    {
+        settings->size = fread( settings->text, 1, INI_LIMIT, file );
+        ok = !ferror( file ) && fgetc( file ) == EOF;
+        if (fclose( file )) ok = 0;
+        if (!ok || memchr( settings->text, 0, settings->size ) ||
+            (settings->size >= 2 && ((unsigned char)settings->text[0] == 0xff ||
+                                     (unsigned char)settings->text[0] == 0xfe))) goto failed;
+    }
+    if (!ini_get( settings, "Autorun", "SettingsApplied", marker, sizeof(marker) ) || strcmp( marker, "1" ))
+    {
+        if (!game_settings_apply_preset( settings, 0 )) goto failed;
+        for (unsigned int i = 0; i < profile->count; i++)
+            if (profile->settings[i].initial &&
+                !game_settings_set( settings, i, profile->settings[i].initial )) goto failed;
+        if (!ini_set( settings, "Autorun", "SettingsApplied", "1" )) goto failed;
+    }
+    return settings;
+failed:
+    free( settings );
+    return NULL;
+}
+
+void game_settings_close( struct game_settings *settings )
+{
+    free( settings );
+}
+
+int game_settings_get( const struct game_settings *settings, unsigned int index, char *value, size_t size )
+{
+    const struct game_setting *option;
+    char first[GAME_SETTINGS_VALUE_SIZE], second[GAME_SETTINGS_VALUE_SIZE];
+    int n;
+
+    if (index >= settings->profile->count) return 0;
+    option = settings->profile->settings + index;
+    if (!ini_get( settings, option->section, option->key, first, sizeof(first) )) return 0;
+    if (option->type != GAME_SETTING_RESOLUTION) n = snprintf( value, size, "%s", first );
+    else
+    {
+        if (!ini_get( settings, option->section, option->key2, second, sizeof(second) )) return 0;
+        n = snprintf( value, size, "%sx%s", first, second );
+    }
+    return n >= 0 && (size_t)n < size;
+}
+
+int game_settings_set( struct game_settings *settings, unsigned int index, const char *value )
+{
+    const struct game_setting *option;
+    char *end;
+
+    if (index >= settings->profile->count) return 0;
+    option = settings->profile->settings + index;
+    if (strlen( value ) >= GAME_SETTINGS_VALUE_SIZE || strpbrk( value, "\r\n" )) return 0;
+    if (option->type == GAME_SETTING_RESOLUTION)
+    {
+        unsigned int width, height;
+        char extra, first[16], second[16];
+
+        if (sscanf( value, "%ux%u%c", &width, &height, &extra ) != 2 ||
+            width < 320 || width > 7680 || height < 200 || height > 4320) return 0;
+        snprintf( first, sizeof(first), "%u", width );
+        snprintf( second, sizeof(second), "%u", height );
+        return ini_set( settings, option->section, option->key, first ) &&
+               ini_set( settings, option->section, option->key2, second );
+    }
+    if (option->type == GAME_SETTING_NUMBER || option->type == GAME_SETTING_INTEGER)
+    {
+        double number = strtod( value, &end );
+        if (end == value || *end || !isfinite( number ) || number < 0 || number > 10000000) return 0;
+        if (option->type == GAME_SETTING_INTEGER && number != (unsigned int)number) return 0;
+    }
+    return ini_set( settings, option->section, option->key, value );
+}
+
+int game_settings_apply_preset( struct game_settings *settings, int preset )
+{
+    if (preset < 0 || (unsigned int)preset >= settings->profile->preset_count) return 0;
+    for (unsigned int i = 0; i < settings->profile->count; i++)
+    {
+        const struct game_setting *option = settings->profile->settings + i;
+        const char *value = option->presets[preset];
+        if (value && !game_settings_set( settings, i, value )) return 0;
+    }
+    return 1;
+}
+
+int game_settings_current_preset( const struct game_settings *settings )
+{
+    for (unsigned int preset = 0; preset < settings->profile->preset_count; preset++)
+    {
+        unsigned int i;
+        for (i = 0; i < settings->profile->count; i++)
+        {
+            const struct game_setting *option = settings->profile->settings + i;
+            const char *expected = option->presets[preset];
+            char value[GAME_SETTINGS_VALUE_SIZE];
+            if (!expected) continue;
+            if (!game_settings_get( settings, i, value, sizeof(value) )) break;
+            if (option->type == GAME_SETTING_NUMBER || option->type == GAME_SETTING_INTEGER)
+            {
+                char *end;
+                double number = strtod( value, &end );
+                if (end == value || *end || number != strtod( expected, NULL )) break;
+            }
+            else if (strcasecmp( value, expected )) break;
+        }
+        if (i == settings->profile->count) return preset;
+    }
+    return -1;
+}
+
+int game_settings_save( struct game_settings *settings )
+{
+    char path[1024], temp[1100], backup[1100];
+    FILE *file;
+    int ok, moved = 0;
+
+    if (!settings->dirty) return 1;
+    snprintf( path, sizeof(path), "%s", settings->path );
+    for (char *p = path + 1; *p; p++) if (*p == '/' && p[-1] != ':')
+    {
+        *p = 0;
+        if (mkdir( path, 0777 ) && errno != EEXIST) return 0;
+        *p = '/';
+    }
+    snprintf( temp, sizeof(temp), "%s.autorun-new", path );
+    snprintf( backup, sizeof(backup), "%s.autorun-old", path );
+    if (!(file = fopen( temp, "wb" ))) return 0;
+    ok = fwrite( settings->text, 1, settings->size, file ) == settings->size;
+    if (ok && (fflush( file ) || fsync( fileno( file ) ))) ok = 0;
+    if (fclose( file )) ok = 0;
+    if (!ok) { remove( temp ); return 0; }
+    if (!access( path, F_OK ))
+    {
+        if ((remove( backup ) && errno != ENOENT) || rename( path, backup ))
+        { remove( temp ); return 0; }
+        moved = 1;
+    }
+    if (rename( temp, path ))
+    {
+        if (moved) rename( backup, path );
+        remove( temp );
+        return 0;
+    }
+    if (moved) remove( backup );
+    settings->dirty = 0;
+    return 1;
+}
+
+int game_settings_prepare( const char *root, const char *target, uint16_t machine )
+{
+    const struct game_settings_profile *profile = game_settings_find( target, machine );
+    struct game_settings *settings;
+    int ok;
+
+    if (!profile) return 1;
+    if (!(settings = game_settings_open( root, profile ))) return 0;
+    ok = game_settings_save( settings );
+    game_settings_close( settings );
+    return ok;
+}

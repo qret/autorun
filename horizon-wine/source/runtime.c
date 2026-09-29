@@ -33,6 +33,7 @@
 #include "launcher_list.h"
 #include "launcher_settings.h"
 #include "gears_startup.h"
+#include "game_settings.h"
 #include "ground_zeroes_startup.h"
 #include "fex_options.h"
 #include "dxvk_options.h"
@@ -4459,6 +4460,8 @@ int main( int argc, char **argv )
     }
     if ((status = runtime_prepare_prince_of_persia( target )))
         log_line( "[WARN] Prince of Persia resolution setup status=%08x", status );
+    if (!game_settings_prepare( WINE_ROOT, target, target_machine ))
+        log_line( "[WARN] Could not prepare game settings for %s", target );
     /* Upstream's start_main_thread does this; without it the PEB (and the
      * WoW64 PEB copied from it) reports zero processors to GetSystemInfo. */
     init_cpu_info();
