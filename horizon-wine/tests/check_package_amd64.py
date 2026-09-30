@@ -7,6 +7,8 @@ from pathlib import Path
 from pathlib import PurePosixPath
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 from zipfile import ZipFile
 
@@ -16,6 +18,22 @@ package = (root / 'horizon-wine/tools/package-amd64.py').read_text()
 for gone in ("'drive_c/windows/system32'", "'drive_c/windows/syswow64'", "'make'", 'dxvk64', 'vkd3d64',
              'winenxaudio', 'make-classes-reg'):
     assert gone not in package, f'package-amd64.py still stages Windows modules ({gone})'
+
+with tempfile.TemporaryDirectory(prefix='autorun-amd64-setup-') as temp:
+    temp = Path(temp)
+    build = temp / 'build'
+    (build / 'licenses').mkdir(parents=True)
+    (build / 'CMakeCache.txt').write_text('WINE_NX_AMD64:BOOL=ON\n')
+    (build / 'switch-dev.json').write_text('{}\n')
+    (build / 'wine-nx-runtime.nro').write_bytes(bytes(16) + b'NRO0')
+    (build / 'licenses/FFmpeg-LGPL-2.1.txt').write_text('fixture\n')
+    setup = b'MZ setup fixture'
+    (build / 'autorun-setup.exe').write_bytes(setup)
+    subprocess.run([sys.executable, str(root / 'horizon-wine/tools/package-amd64.py'),
+                    '--build', str(build), '--stage-output', str(temp / 'stage')], check=True)
+    assert (temp / 'stage/switch/wine/drive_c/windows/autorun-setup.exe').read_bytes() == setup
+
+print('PASS: the AMD64 package includes the Windows component setup')
 
 autorun = root / 'horizon-wine/tools/package-autorun.py'
 autorun_tree = ast.parse(autorun.read_text(), filename=str(autorun))

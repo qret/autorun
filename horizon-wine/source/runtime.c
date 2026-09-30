@@ -33,6 +33,7 @@
 #include "launcher_list.h"
 #include "launcher_settings.h"
 #include "gears_startup.h"
+#include "fallout3_startup.h"
 #include "game_settings.h"
 #include "ground_zeroes_startup.h"
 #include "gtaiv_startup.h"
@@ -1735,6 +1736,22 @@ static NTSTATUS runtime_apply_startup_compat( const char *target, void *module, 
     int gears = gears_startup_target( target, nt->FileHeader.Machine );
     int ground_zeroes = ground_zeroes_startup_target( target, nt->FileHeader.Machine );
 
+    if (fallout3_startup_target( target, nt->FileHeader.Machine ))
+    {
+        for (unsigned int i = 0; i < nt->FileHeader.NumberOfSections; i++)
+        {
+            if (!(section[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+            if (!fallout3_startup_scan( module, size, nt->OptionalHeader.ImageBase,
+                                       section[i].VirtualAddress, section[i].Misc.VirtualSize, &call_rva ))
+                return STATUS_SUCCESS;
+        }
+        if (!call_rva) return STATUS_SUCCESS;
+        status = runtime_patch_image( module, call_rva, fallout3_startup_replacement,
+                                      sizeof(fallout3_startup_replacement) );
+        if (status) return status;
+        log_line( "[COMPAT] Fallout 3: direct startup enabled" );
+        return STATUS_SUCCESS;
+    }
     if (gtaiv_startup_target( target, nt->FileHeader.Machine ))
     {
         if (gtaiv_startup_scan( module, size, nt->OptionalHeader.ImageBase,

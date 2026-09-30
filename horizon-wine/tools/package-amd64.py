@@ -104,6 +104,7 @@ for name in ('fonts', 'nls'):
         if name == 'fonts':
             stage_file(path, drive / 'windows/fonts' / path.name)
 stage_file(nro, stage / nro.name)
+stage_file(build / 'autorun-setup.exe', drive / 'windows/autorun-setup.exe')
 licenses = stage / 'licenses'
 stage_file(build / 'licenses/FFmpeg-LGPL-2.1.txt', licenses / 'FFmpeg-LGPL-2.1.txt')
 if mono_manifest:

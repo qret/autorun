@@ -140,6 +140,53 @@ static void check_spiderman_wos_settings(void)
     }
 }
 
+static void check_fallout3_settings(void)
+{
+    char directory[] = "/tmp/fallout3-settings-XXXXXX", path[1024], value[64];
+    const struct game_settings_profile *profile = &fallout3_profile;
+    struct game_settings *settings;
+    unsigned int resolution = profile_option_index(profile, "iSize W");
+    int previous_writes;
+
+    assert(mkdtemp(directory));
+    assert(game_settings_find("ums0:/Fallout 3/Fallout3.exe", 0x14c) == profile);
+    assert(!game_settings_find("FalloutLauncherSteam.exe", 0x14c));
+    assert(!game_settings_find("Fallout3.exe", 0x8664));
+    assert(profile->count + 1 <= GAME_SETTINGS_MAX_ROWS);
+    assert(game_settings_prepare(directory, "Fallout3.exe", 0x14c));
+    settings = game_settings_open(directory, profile);
+    assert(settings && game_settings_get(settings, resolution, value, sizeof(value)));
+    assert(!strcmp(value, "1280x720") && game_settings_current_preset(settings) == 0);
+    for (unsigned int p = 0; p < profile->preset_count; p++)
+    {
+        assert(game_settings_apply_preset(settings, p));
+        assert(game_settings_current_preset(settings) == (int)p);
+        for (unsigned int i = 0; i < profile->count; i++)
+        {
+            const struct game_setting *option = profile->settings + i;
+            assert(game_settings_get(settings, i, value, sizeof(value)));
+            if (option->presets[p]) assert(strtod(value, NULL) == strtod(option->presets[p], NULL));
+        }
+    }
+    assert(game_settings_set(settings, resolution, "1600x900"));
+    assert(game_settings_save(settings));
+    snprintf(path, sizeof(path), "%s", settings->path);
+    game_settings_close(settings);
+    previous_writes = writes;
+    assert(game_settings_prepare(directory, "Fallout3.exe", 0x14c) && writes == previous_writes);
+    settings = game_settings_open(directory, profile);
+    assert(game_settings_get(settings, resolution, value, sizeof(value)) && !strcmp(value, "1600x900"));
+    assert(game_settings_current_preset(settings) == 3);
+    game_settings_close(settings);
+    assert(!unlink(path));
+    while (strcmp(path, directory))
+    {
+        char *slash = strrchr(path, '/');
+        assert(slash); *slash = 0;
+        assert(!rmdir(path));
+    }
+}
+
 int main(void)
 {
     char directory[] = "/tmp/game-settings-XXXXXX", path[1024], backup[1100];
@@ -147,6 +194,7 @@ int main(void)
     int previous_writes;
 
     check_spiderman_wos_settings();
+    check_fallout3_settings();
     assert( mkdtemp( directory ) );
     assert( game_settings_find( "ums0:/games/Fallout4.exe", 0x8664 ) == &fallout4_profile );
     assert( game_settings_find( "C:\\Games\\FALLOUT4.EXE", 0x8664 ) == &fallout4_profile );

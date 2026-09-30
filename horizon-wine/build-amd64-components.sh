@@ -32,6 +32,10 @@ case "$build" in "$root"/*) ;; *) echo "Switch build must be inside the Wine che
         --without-gstreamer --enable-winegstreamer --without-vulkan
     make -j"$jobs" include/all
 )
+i686-w64-mingw32-clang -Os -Wall -Wextra -Werror -fno-builtin -nostdlib \
+    -Wl,--entry,_start@0 -Wl,--image-base,0x10000000 -Wl,--dynamicbase \
+    -o "$build/autorun-setup.exe" "$root/horizon-wine/tools/autorun_setup.c" \
+    -lole32 -ladvapi32 -lkernel32 -lntdll
 sh "$root/horizon-wine/tools/bootstrap-box64-core.sh"
 sh "$root/horizon-wine/tools/bootstrap-wma.sh"
 # The switch-dev image (switch-dev.txt) has libnx, mesa-switch, LSFG-VK and
