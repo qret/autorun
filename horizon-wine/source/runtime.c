@@ -35,6 +35,7 @@
 #include "gears_startup.h"
 #include "game_settings.h"
 #include "ground_zeroes_startup.h"
+#include "gtaiv_startup.h"
 #include "fex_options.h"
 #include "dxvk_options.h"
 #include "input_profile.h"
@@ -1734,6 +1735,30 @@ static NTSTATUS runtime_apply_startup_compat( const char *target, void *module, 
     int gears = gears_startup_target( target, nt->FileHeader.Machine );
     int ground_zeroes = ground_zeroes_startup_target( target, nt->FileHeader.Machine );
 
+    if (gtaiv_startup_target( target, nt->FileHeader.Machine ))
+    {
+        if (gtaiv_startup_scan( module, size, nt->OptionalHeader.ImageBase,
+                               nt->OptionalHeader.AddressOfEntryPoint, &call_rva ))
+        {
+            status = runtime_patch_image( module, call_rva, gtaiv_startup_replacement,
+                                          sizeof(gtaiv_startup_replacement) );
+            if (status) return status;
+            log_line( "[COMPAT] GTA IV: startup intro skipped" );
+        }
+        call_rva = 0;
+        for (unsigned int i = 0; i < nt->FileHeader.NumberOfSections; i++)
+        {
+            if (!(section[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+            if (!gtaiv_nvapi_scan( module, size, section[i].VirtualAddress,
+                                  section[i].Misc.VirtualSize, &call_rva )) return STATUS_SUCCESS;
+        }
+        if (!call_rva) return STATUS_SUCCESS;
+        status = runtime_patch_image( module, call_rva, gtaiv_nvapi_replacement,
+                                      sizeof(gtaiv_nvapi_replacement) );
+        if (status) return status;
+        log_line( "[COMPAT] GTA IV: NVAPI enumeration error handling enabled" );
+        return STATUS_SUCCESS;
+    }
     if (!gears && !ground_zeroes) return STATUS_SUCCESS;
     /* The guest loader applies image relocations later. */
     for (unsigned int i = 0; i < nt->FileHeader.NumberOfSections; i++)
@@ -3886,6 +3911,8 @@ int main( int argc, char **argv )
     mkdir( WINE_NX_RUNTIME_WINDOWS, 0777 );
     mkdir( WINE_NX_RUNTIME_WINDOWS "/temp", 0777 );
     mkdir( WINE_SYSTEM_DIR, 0777 );
+    mkdir( WINE_DRIVE_C "/Program Files", 0777 );
+    mkdir( WINE_DRIVE_C "/Program Files (x86)", 0777 );
     mkdir( WINE_DRIVE_C "/ProgramData", 0777 );
     mkdir( WINE_DRIVE_C "/users", 0777 );
     mkdir( WINE_DRIVE_C "/users/Public", 0777 );
