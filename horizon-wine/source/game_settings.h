@@ -8,6 +8,7 @@
 #define GAME_SETTINGS_VALUE_SIZE 64
 
 enum game_setting_type { GAME_SETTING_NUMBER, GAME_SETTING_INTEGER, GAME_SETTING_TEXT, GAME_SETTING_RESOLUTION };
+enum game_settings_format { GAME_SETTINGS_INI, GAME_SETTINGS_XML };
 
 struct game_setting_choice
 {
@@ -33,6 +34,9 @@ struct game_settings_profile
     unsigned int preset_count;
     const struct game_setting *settings;
     unsigned int count;
+    enum game_settings_format format;
+    const char *initial_text;
+    const char *pending_resolution[2];
 };
 
 struct game_settings;

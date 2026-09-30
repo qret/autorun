@@ -42,18 +42,21 @@ int launcher_game_settings_rows( const struct launcher_game_settings *state,
     if (!state->settings)
     {
         snprintf( rows[0].label, sizeof(rows[0].label), "Cannot read game settings" );
-        rows[0].help = "The existing INI was left unchanged. Select to try again.";
+        rows[0].help = "The existing configuration was left unchanged. Select to try again.";
         rows[0].group = group;
         ids[0] = base;
         return 1;
     }
-    preset = game_settings_current_preset( state->settings );
-    snprintf( rows[count].label, sizeof(rows[count].label), "Graphics preset" );
-    snprintf( rows[count].value, sizeof(rows[count].value), "%s", preset < 0 ? "Custom" : state->profile->presets[preset] );
-    rows[count].kind = UI_ROW_DROPDOWN;
-    rows[count].choices = state->profile->preset_count;
-    rows[count].help = "Edits the game's INI. Applied once; later edits are preserved. Saves and controls are unchanged.";
-    ids[count++] = base;
+    if (state->profile->preset_count)
+    {
+        preset = game_settings_current_preset( state->settings );
+        snprintf( rows[count].label, sizeof(rows[count].label), "Graphics preset" );
+        snprintf( rows[count].value, sizeof(rows[count].value), "%s", preset < 0 ? "Custom" : state->profile->presets[preset] );
+        rows[count].kind = UI_ROW_DROPDOWN;
+        rows[count].choices = state->profile->preset_count;
+        rows[count].help = "Edits the game's configuration. Applied once; later edits are preserved. Saves and controls are unchanged.";
+        ids[count++] = base;
+    }
     for (unsigned int i = 0; i < state->profile->count && count < GAME_SETTINGS_MAX_ROWS; i++)
     {
         const struct game_setting *option = state->profile->settings + i;

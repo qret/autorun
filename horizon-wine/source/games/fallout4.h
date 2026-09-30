@@ -170,7 +170,8 @@ static const char *const fallout4_presets[] = { "Low", "Medium", "High", "Ultra"
 static const struct game_settings_profile fallout4_profile = {
     "Fallout4.exe", 0x8664, "drive_c/users/steamuser/Documents/My Games/Fallout4/Fallout4Prefs.ini",
     fallout4_presets, sizeof(fallout4_presets) / sizeof(fallout4_presets[0]),
-    fallout4_settings, sizeof(fallout4_settings) / sizeof(fallout4_settings[0])
+    fallout4_settings, sizeof(fallout4_settings) / sizeof(fallout4_settings[0]),
+    GAME_SETTINGS_INI, NULL, { NULL }
 };
 
 #endif

@@ -26,11 +26,16 @@ static int test_rename( const char *from, const char *to )
 #undef fsync
 #undef rename
 
+static unsigned int profile_option_index( const struct game_settings_profile *profile, const char *key )
+{
+    for (unsigned int i = 0; i < profile->count; i++)
+        if (!strcmp( profile->settings[i].key, key )) return i;
+    abort();
+}
+
 static unsigned int option_index( const char *key )
 {
-    for (unsigned int i = 0; i < fallout4_profile.count; i++)
-        if (!strcmp( fallout4_profile.settings[i].key, key )) return i;
-    abort();
+    return profile_option_index( &fallout4_profile, key );
 }
 
 static void expect( struct game_settings *settings, const char *key, const char *expected )
@@ -48,12 +53,100 @@ static void write_text( const char *path, const char *text )
     assert( !fclose( file ) );
 }
 
+static void check_spiderman_wos_settings(void)
+{
+    char directory[] = "/tmp/spiderman-settings-XXXXXX", path[1024], text[2048], oversized[1100];
+    const struct game_settings_profile *profile = &spiderman_wos_profile;
+    struct game_settings *settings;
+    FILE *file;
+    int previous_writes;
+
+    assert( mkdtemp( directory ) );
+    snprintf( path, sizeof(path), "%s/%s", directory, profile->path );
+    assert( game_settings_find( "ums0:/Games/Spider-Man Web of Shadows.exe", 0x014c ) == profile );
+    assert( !game_settings_find( "Spider-Man Launcher.exe", 0x014c ) );
+    assert( !game_settings_find( "Spider-Man Web of Shadows.exe", 0x8664 ) );
+    assert( game_settings_prepare( directory, "Spider-Man Launcher.exe", 0x014c ) );
+    assert( game_settings_prepare( directory, "Spider-Man Web of Shadows.exe", 0x8664 ) );
+    assert( game_settings_prepare( directory, "Spider-Man Web of Shadows.exe.bak", 0x014c ) );
+    assert( access( path, F_OK ) );
+    fail_sync = 1;
+    assert( !game_settings_prepare( directory, "ums0:/Games/Spider-Man Web of Shadows.exe", 0x014c ) );
+    assert( access( path, F_OK ) );
+    fail_sync = 0;
+    assert( game_settings_prepare( directory, "sdmc:/Games/Spider-Man Web of Shadows.exe", 0x014c ) );
+    file = fopen( path, "rb" );
+    assert( file );
+    size_t size = fread( text, 1, sizeof(text) - 1, file );
+    text[size] = 0;
+    assert( strstr( text, "<s id=\"VideoW\">1280</s>" ) );
+    assert( strstr( text, "<s id=\"VideoH\">720</s>" ) );
+    assert( strstr( text, "<s id=\"VideoDesiredW\">0</s>" ) );
+    assert( strstr( text, "<s id=\"VideoDesiredH\">0</s>" ) );
+    assert( strstr( text, "<s id=\"ActionCenterCamera\">526</s>" ) );
+    assert( !fclose( file ) );
+    write_text( path, "\xef\xbb\xbf<?xml version='1.0'?>\n<r>\n"
+                "<!-- <s id='VideoW'>999</s> -->\n"
+                "<s other='keep' id = 'VideoW'>800</s><s id='VideoW'>640</s>\n"
+                "<s id='VideoH'>600</s><s id='Version'>7</s><s id='Mod'>A&amp;B</s>\n"
+                "<s id='VideoDesiredW'>1920</s><s id='VideoDesiredH'>1080</s>\n</r>\n" );
+    assert( game_settings_prepare( directory, "Spider-Man Web of Shadows.exe", 0x014c ) );
+    settings = game_settings_open( directory, profile );
+    assert( settings && game_settings_current_preset( settings ) == -1 );
+    assert( game_settings_get( settings, 0, text, sizeof(text) ) && !strcmp( text, "1280x720" ) );
+    assert( strstr( settings->text, "<s id='Mod'>A&amp;B</s>" ) );
+    assert( strstr( settings->text, "<!-- <s id='VideoW'>999</s> -->" ) );
+    assert( !strstr( settings->text, "id = 'VideoW'" ) && !strstr( settings->text, "<s id='VideoW'>640</s>" ) );
+    assert( !memcmp( settings->text, "\xef\xbb\xbf", 3 ) );
+    assert( !game_settings_set( settings, 0, "1280x0" ) );
+    assert( game_settings_set( settings, 0, "1920x1080" ) );
+    assert( game_settings_set( settings, profile_option_index( profile, "VideoShadows" ), "0" ) );
+    assert( game_settings_set( settings, profile_option_index( profile, "MouseSens" ), "37.5" ) );
+    assert( game_settings_set( settings, profile_option_index( profile, "ActionJump" ), "285" ) );
+    assert( game_settings_save( settings ) );
+    game_settings_close( settings );
+    previous_writes = writes;
+    assert( game_settings_prepare( directory, "D:\\Games\\SPIDER-MAN WEB OF SHADOWS.EXE", 0x014c ) );
+    assert( writes == previous_writes );
+    settings = game_settings_open( directory, profile );
+    assert( settings && game_settings_get( settings, 0, text, sizeof(text) ) && !strcmp( text, "1920x1080" ) );
+    assert( config_get( settings, NULL, "VideoDesiredW", text, sizeof(text) ) && !strcmp( text, "0" ) );
+    assert( config_get( settings, NULL, "VideoDesiredH", text, sizeof(text) ) && !strcmp( text, "0" ) );
+    assert( game_settings_get( settings, profile_option_index( profile, "MouseSens" ), text, sizeof(text) ) && !strcmp( text, "37.5" ) );
+    assert( game_settings_get( settings, profile_option_index( profile, "ActionJump" ), text, sizeof(text) ) && !strcmp( text, "285" ) );
+    assert( game_settings_get( settings, profile_option_index( profile, "VideoShadows" ), text, sizeof(text) ) && !strcmp( text, "0" ) );
+    assert( strstr( settings->text, "<s id='Mod'>A&amp;B</s>" ) );
+    assert( !game_settings_set( settings, profile_option_index( profile, "ActionJump" ), "1.5" ) );
+    game_settings_close( settings );
+    write_text( path, "<r><s id='VideoW'>800</s>" );
+    assert( !game_settings_open( directory, profile ) );
+    write_text( path, "<r><s id='VideoW'/><s id='Autorun.SettingsApplied'>1</s></r>" );
+    settings = game_settings_open( directory, profile );
+    assert( settings && config_get( settings, NULL, "VideoW", text, sizeof(text) ) && !*text );
+    assert( game_settings_set( settings, 0, "1280x720" ) && game_settings_save( settings ) );
+    game_settings_close( settings );
+    assert( !unlink( path ) );
+    assert( !mkdir( path, 0777 ) );
+    assert( !game_settings_prepare( directory, "Spider-Man Web of Shadows.exe", 0x014c ) );
+    assert( !rmdir( path ) );
+    memset( oversized, 'x', sizeof(oversized) - 1 );
+    oversized[sizeof(oversized) - 1] = 0;
+    assert( !game_settings_prepare( oversized, "Spider-Man Web of Shadows.exe", 0x014c ) );
+    while (strcmp( path, directory ))
+    {
+        char *slash = strrchr( path, '/' );
+        assert( slash ); *slash = 0;
+        assert( !rmdir( path ) );
+    }
+}
+
 int main(void)
 {
     char directory[] = "/tmp/game-settings-XXXXXX", path[1024], backup[1100];
     struct game_settings *settings, *other;
     int previous_writes;
 
+    check_spiderman_wos_settings();
     assert( mkdtemp( directory ) );
     assert( game_settings_find( "ums0:/games/Fallout4.exe", 0x8664 ) == &fallout4_profile );
     assert( game_settings_find( "C:\\Games\\FALLOUT4.EXE", 0x8664 ) == &fallout4_profile );
@@ -159,7 +252,8 @@ int main(void)
         };
         static const char *const presets[] = { "Low", "High" };
         static const struct game_settings_profile profile = {
-            "Another.exe", 0x014c, "other.ini", presets, 2, options, 1
+            "Another.exe", 0x014c, "other.ini", presets, 2, options, 1,
+            GAME_SETTINGS_INI, NULL, { NULL }
         };
         char value[32], other_path[1024];
         other = game_settings_open( directory, &profile );
