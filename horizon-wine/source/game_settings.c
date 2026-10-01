@@ -11,6 +11,7 @@
 #include "game_settings.h"
 #include "games/fallout3.h"
 #include "games/fallout4.h"
+#include "games/falloutnv.h"
 #include "games/moha.h"
 #include "games/spiderman_wos.h"
 
@@ -272,7 +273,7 @@ static int config_set( struct game_settings *settings, const char *section, cons
 const struct game_settings_profile *game_settings_find( const char *target, uint16_t machine )
 {
     static const struct game_settings_profile *const profiles[] = {
-        &fallout3_profile, &fallout4_profile, &moha_profile, &spiderman_wos_profile
+        &fallout3_profile, &fallout4_profile, &falloutnv_profile, &moha_profile, &spiderman_wos_profile
     };
     const char *name = target;
 

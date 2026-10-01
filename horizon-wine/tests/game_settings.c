@@ -265,6 +265,63 @@ static void check_moha_settings(void)
     }
 }
 
+static void check_falloutnv_settings(void)
+{
+    char directory[] = "/tmp/falloutnv-settings-XXXXXX", path[1024], value[64];
+    const struct game_settings_profile *profile = &falloutnv_profile;
+    struct game_settings *settings;
+    unsigned int resolution = profile_option_index(profile, "iSize W");
+    int previous_writes;
+
+    assert(mkdtemp(directory));
+    assert(game_settings_find("ums0:/Fallout New Vegas/FalloutNV.exe", 0x14c) == profile);
+    assert(game_settings_find("D:\\Games\\FALLOUTNV.EXE", 0x14c) == profile);
+    assert(!game_settings_find("FalloutNVLauncher.exe", 0x14c));
+    assert(!game_settings_find("FalloutNV.exe", 0x8664));
+    assert(!strcmp(profile->path, "drive_c/users/steamuser/Documents/My Games/FalloutNV/FalloutPrefs.ini"));
+    assert(profile->count + 1 <= GAME_SETTINGS_MAX_ROWS);
+    assert(game_settings_prepare(directory, "FalloutNV.exe", 0x14c));
+    settings = game_settings_open(directory, profile);
+    assert(settings && game_settings_get(settings, resolution, value, sizeof(value)));
+    assert(!strcmp(value, "1280x720") && game_settings_current_preset(settings) == 0);
+    assert(game_settings_get(settings, profile_option_index(profile, "fLODFadeOutMultActors"), value, sizeof(value)));
+    assert(!strcmp(value, "2.5"));
+    assert(game_settings_get(settings, profile_option_index(profile, "fLODFadeOutMultItems"), value, sizeof(value)));
+    assert(!strcmp(value, "3"));
+    assert(config_set(settings, "Controls", "bUse Joystick", "0"));
+    assert(config_set(settings, "Mods", "Keep", "unchanged"));
+    for (unsigned int p = 0; p < profile->preset_count; p++)
+    {
+        assert(game_settings_apply_preset(settings, p));
+        assert(game_settings_current_preset(settings) == (int)p);
+        for (unsigned int i = 0; i < profile->count; i++)
+        {
+            const struct game_setting *option = profile->settings + i;
+            assert(game_settings_get(settings, i, value, sizeof(value)));
+            if (option->presets[p]) assert(strtod(value, NULL) == strtod(option->presets[p], NULL));
+        }
+    }
+    assert(game_settings_set(settings, resolution, "1600x900"));
+    assert(game_settings_save(settings));
+    snprintf(path, sizeof(path), "%s", settings->path);
+    game_settings_close(settings);
+    previous_writes = writes;
+    assert(game_settings_prepare(directory, "FalloutNV.exe", 0x14c) && writes == previous_writes);
+    settings = game_settings_open(directory, profile);
+    assert(settings && game_settings_get(settings, resolution, value, sizeof(value)) && !strcmp(value, "1600x900"));
+    assert(game_settings_current_preset(settings) == 3);
+    assert(config_get(settings, "Controls", "bUse Joystick", value, sizeof(value)) && !strcmp(value, "0"));
+    assert(config_get(settings, "Mods", "Keep", value, sizeof(value)) && !strcmp(value, "unchanged"));
+    game_settings_close(settings);
+    assert(!unlink(path));
+    while (strcmp(path, directory))
+    {
+        char *slash = strrchr(path, '/');
+        assert(slash); *slash = 0;
+        assert(!rmdir(path));
+    }
+}
+
 int main(void)
 {
     char directory[] = "/tmp/game-settings-XXXXXX", path[1024], backup[1100];
@@ -273,6 +330,7 @@ int main(void)
 
     check_spiderman_wos_settings();
     check_fallout3_settings();
+    check_falloutnv_settings();
     check_moha_settings();
     assert( mkdtemp( directory ) );
     assert( game_settings_find( "ums0:/games/Fallout4.exe", 0x8664 ) == &fallout4_profile );
