@@ -187,6 +187,84 @@ static void check_fallout3_settings(void)
     }
 }
 
+static void check_moha_settings(void)
+{
+    char directory[] = "/tmp/moha-settings-XXXXXX", path[1024], value[64], command[1024];
+    const struct game_settings_profile *profile = &moha_profile;
+    struct game_settings *settings;
+    unsigned int resolution = profile_option_index( profile, "StartupResolutionX" );
+    int previous_writes;
+
+    assert( mkdtemp( directory ) );
+    assert( game_settings_find( "ums0:/MOHA/UnrealEngine3/Binaries/MOHA.exe", 0x014c ) == profile );
+    assert( game_settings_find( "D:\\Games\\moha.EXE", 0x014c ) == profile );
+    assert( !game_settings_find( "moha_setup.exe", 0x014c ) );
+    assert( !game_settings_find( "MOHA.exe", 0x8664 ) );
+    assert( profile->count + 1 <= GAME_SETTINGS_MAX_ROWS );
+    settings = game_settings_open( directory, profile );
+    assert( settings && game_settings_current_preset( settings ) == 0 );
+    assert( strstr( settings->text, "BasedOn=..\\MOHAGame\\Config\\DefaultEngine.ini" ) );
+    assert( game_settings_get( settings, resolution, value, sizeof(value) ) && !strcmp( value, "1280x720" ) );
+    assert( game_settings_set( settings, resolution, "960x540" ) );
+    for (unsigned int preset = 0; preset < profile->preset_count; preset++)
+    {
+        assert( game_settings_apply_preset( settings, preset ) );
+        assert( game_settings_current_preset( settings ) == (int)preset );
+        assert( game_settings_get( settings, resolution, value, sizeof(value) ) && !strcmp( value, "960x540" ) );
+        for (unsigned int i = 0; i < profile->count; i++)
+        {
+            const struct game_setting *option = profile->settings + i;
+            if (option->presets[preset])
+            {
+                assert( game_settings_get( settings, i, value, sizeof(value) ) );
+                assert( !strcmp( value, option->presets[preset] ) );
+            }
+            for (unsigned int j = 0; j < option->choice_count; j++)
+                assert( strlen( option->choices[j].value ) < GAME_SETTINGS_VALUE_SIZE );
+        }
+    }
+    assert( game_settings_get( settings, profile_option_index( profile, "MaxParticlesAllowed" ), value, sizeof(value) ) );
+    assert( !strcmp( value, "-1" ) );
+    assert( game_settings_set( settings, profile_option_index( profile, "bAllowBloom" ), "False" ) );
+    assert( ini_set( settings, "Custom", "Keep", "yes" ) );
+    assert( game_settings_save( settings ) );
+    snprintf( path, sizeof(path), "%s", settings->path );
+    game_settings_close( settings );
+    previous_writes = writes;
+    assert( game_settings_prepare( directory, "MOHA.exe", 0x014c ) && writes == previous_writes );
+    settings = game_settings_open( directory, profile );
+    assert( settings && game_settings_current_preset( settings ) == -1 );
+    assert( game_settings_get( settings, resolution, value, sizeof(value) ) && !strcmp( value, "960x540" ) );
+    assert( game_settings_get( settings, profile_option_index( profile, "bAllowBloom" ), value, sizeof(value) ) );
+    assert( !strcmp( value, "False" ) && strstr( settings->text, "Keep=yes" ) );
+    game_settings_close( settings );
+
+    strcpy( command, "\"C:\\MOHA.exe\" -log" );
+    assert( game_settings_append_arguments( "MOHA.exe", 0x8664, command, sizeof(command) ) );
+    assert( !strcmp( command, "\"C:\\MOHA.exe\" -log" ) );
+    assert( game_settings_append_arguments( "moha_setup.exe", 0x014c, command, sizeof(command) ) );
+    assert( !strcmp( command, "\"C:\\MOHA.exe\" -log" ) );
+    size_t needed = strlen(command) + strlen(profile->arguments) + 2;
+    assert( !game_settings_append_arguments( "MOHA.exe", 0x014c, command, needed - 1 ) );
+    assert( !strcmp( command, "\"C:\\MOHA.exe\" -log" ) );
+    assert( game_settings_append_arguments( "MOHA.exe", 0x014c, command, needed ) );
+    assert( !strncmp( command, "\"C:\\MOHA.exe\" -log -NO_LAUNCHER ", 31 ) );
+    assert( strstr( command, " -NOWXWINDOWS " ) );
+    assert( strstr( command, "-DEFENGINEINI=\"C:\\users\\steamuser\\Documents\\EA Games\\" ) );
+    assert( strlen(command) == needed - 1 );
+    memset( command, 'x', sizeof(command) );
+    assert( !game_settings_append_arguments( "MOHA.exe", 0x014c, command, sizeof(command) ) );
+    assert( !game_settings_append_arguments( "MOHA.exe", 0x014c, command, 0 ) );
+    for (unsigned int i = 0; i < sizeof(command); i++) assert( command[i] == 'x' );
+    assert( !unlink( path ) );
+    while (strcmp( path, directory ))
+    {
+        char *slash = strrchr( path, '/' );
+        assert( slash ); *slash = 0;
+        assert( !rmdir( path ) );
+    }
+}
+
 int main(void)
 {
     char directory[] = "/tmp/game-settings-XXXXXX", path[1024], backup[1100];
@@ -195,6 +273,7 @@ int main(void)
 
     check_spiderman_wos_settings();
     check_fallout3_settings();
+    check_moha_settings();
     assert( mkdtemp( directory ) );
     assert( game_settings_find( "ums0:/games/Fallout4.exe", 0x8664 ) == &fallout4_profile );
     assert( game_settings_find( "C:\\Games\\FALLOUT4.EXE", 0x8664 ) == &fallout4_profile );
@@ -301,7 +380,7 @@ int main(void)
         static const char *const presets[] = { "Low", "High" };
         static const struct game_settings_profile profile = {
             "Another.exe", 0x014c, "other.ini", presets, 2, options, 1,
-            GAME_SETTINGS_INI, NULL, { NULL }
+            GAME_SETTINGS_INI, NULL, { NULL }, NULL
         };
         char value[32], other_path[1024];
         other = game_settings_open( directory, &profile );

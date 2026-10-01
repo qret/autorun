@@ -11,6 +11,7 @@
 #include "game_settings.h"
 #include "games/fallout3.h"
 #include "games/fallout4.h"
+#include "games/moha.h"
 #include "games/spiderman_wos.h"
 
 #define INI_LIMIT 65536
@@ -271,7 +272,7 @@ static int config_set( struct game_settings *settings, const char *section, cons
 const struct game_settings_profile *game_settings_find( const char *target, uint16_t machine )
 {
     static const struct game_settings_profile *const profiles[] = {
-        &fallout3_profile, &fallout4_profile, &spiderman_wos_profile
+        &fallout3_profile, &fallout4_profile, &moha_profile, &spiderman_wos_profile
     };
     const char *name = target;
 
@@ -279,6 +280,20 @@ const struct game_settings_profile *game_settings_find( const char *target, uint
     for (unsigned int i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++)
         if (profiles[i]->machine == machine && !strcasecmp( name, profiles[i]->executable )) return profiles[i];
     return NULL;
+}
+
+int game_settings_append_arguments( const char *target, uint16_t machine, char *command_line, size_t size )
+{
+    const struct game_settings_profile *profile = game_settings_find( target, machine );
+    size_t length, extra;
+
+    if (!profile || !profile->arguments) return 1;
+    length = strnlen( command_line, size );
+    extra = strlen( profile->arguments );
+    if (length >= size || size - length <= extra + 1) return 0;
+    command_line[length] = ' ';
+    memcpy( command_line + length + 1, profile->arguments, extra + 1 );
+    return 1;
 }
 
 struct game_settings *game_settings_open( const char *root, const struct game_settings_profile *profile )

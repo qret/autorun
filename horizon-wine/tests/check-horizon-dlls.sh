@@ -33,7 +33,7 @@ wanted = {
                                  'physxloader.dll', 'physxdevice.dll', 'cudart32_41_22.dll', 'xlive.dll'},
     'drive_c/dxvk64': {'dxgi.dll', 'dxvk-manifest.json'},
 }
-for sdk in ('2.7.1', '2.7.3', '2.7.4', '2.7.5', '2.7.6', '2.8.0', '2.8.1', '2.8.3'):
+for sdk in ('2.7.1', '2.7.2', '2.7.3', '2.7.4', '2.7.5', '2.7.6', '2.8.0', '2.8.1', '2.8.3'):
     wanted[f'drive_c/physx/Engine/v{sdk}'] = {'physxcore.dll', 'physxcooking.dll'}
 manifest['files'] = [f for f in manifest['files'] if f['name'] in wanted.get(f['path'], ())]
 assert len(manifest['files']) == sum(map(len, wanted.values())), len(manifest['files'])

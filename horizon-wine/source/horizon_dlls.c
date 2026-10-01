@@ -48,6 +48,7 @@ const char *const horizon_dlls_folders[] =
     "drive_c/dxvk64",
     "drive_c/vkd3d64",
     "drive_c/physx/Engine/v2.7.1",
+    "drive_c/physx/Engine/v2.7.2",
     "drive_c/physx/Engine/v2.7.3",
     "drive_c/physx/Engine/v2.7.4",
     "drive_c/physx/Engine/v2.7.5",

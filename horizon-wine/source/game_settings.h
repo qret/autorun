@@ -37,11 +37,13 @@ struct game_settings_profile
     enum game_settings_format format;
     const char *initial_text;
     const char *pending_resolution[2];
+    const char *arguments;
 };
 
 struct game_settings;
 
 const struct game_settings_profile *game_settings_find( const char *target, uint16_t machine );
+int game_settings_append_arguments( const char *target, uint16_t machine, char *command_line, size_t size );
 struct game_settings *game_settings_open( const char *root, const struct game_settings_profile *profile );
 void game_settings_close( struct game_settings *settings );
 int game_settings_get( const struct game_settings *settings, unsigned int index, char *value, size_t size );

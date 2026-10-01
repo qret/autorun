@@ -1901,6 +1901,8 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
         log_line( "[ARGS] CommandLine='%s'", cmdline_str );
     }
 
+    if (!game_settings_append_arguments( target, main_image_info.Machine, cmdline, sizeof(cmdline) )) return NULL;
+
     chars = strlen( current_dir ) + 1;
     chars += strlen( dll_path ) + 1;
     chars += strlen( dos_path ) + 1;
