@@ -38,8 +38,8 @@ int main(void)
     strcpy(args, "game");
     assert(kingdom_hearts_append_arguments("KINGDOM HEARTS HD 1.5+2.5 Launcher.exe", 0x8664, args, sizeof(args)));
     assert(!strcmp(args, "game"));
-    assert(!kingdom_hearts_has_argument("-EpicPortalSuffix -other=-epicapp=custom", "-EpicPortal"));
-    assert(!kingdom_hearts_has_argument("-other=-epicapp=custom", "-epicapp="));
+    assert(!game_has_argument("-EpicPortalSuffix -other=-epicapp=custom", "-EpicPortal"));
+    assert(!game_has_argument("-other=-epicapp=custom", "-epicapp="));
     puts("Kingdom Hearts arguments: profiles, overrides, capacity and idempotence passed");
     return 0;
 }

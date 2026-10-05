@@ -38,6 +38,7 @@
 #include "ground_zeroes_startup.h"
 #include "gtaiv_startup.h"
 #include "games/kingdom_hearts.h"
+#include "games/tomb_raider.h"
 #include "fex_options.h"
 #include "dxvk_options.h"
 #include "input_profile.h"
@@ -1905,6 +1906,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
 
     if (!game_settings_append_arguments( target, main_image_info.Machine, cmdline, sizeof(cmdline) )) return NULL;
     if (!kingdom_hearts_append_arguments( target, main_image_info.Machine, cmdline, sizeof(cmdline) )) return NULL;
+    if (!tomb_raider_append_arguments( target, main_image_info.Machine, cmdline, sizeof(cmdline) )) return NULL;
 
     chars = strlen( current_dir ) + 1;
     chars += strlen( dll_path ) + 1;

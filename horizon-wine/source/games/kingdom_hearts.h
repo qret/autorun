@@ -2,30 +2,7 @@
 #define AUTORUN_KINGDOM_HEARTS_H
 
 #include <stdint.h>
-#include <string.h>
-#include <strings.h>
-
-static inline int kingdom_hearts_has_argument( const char *command_line, const char *key )
-{
-    size_t length = strlen( key );
-
-    while (*command_line)
-    {
-        const char *argument;
-        int quoted = 0;
-        while (*command_line == ' ' || *command_line == '\t') command_line++;
-        argument = command_line + (*command_line == '"');
-        if (!strncasecmp( argument, key, length ) &&
-            (key[length - 1] == '=' || !argument[length] || argument[length] == '"' ||
-             argument[length] == ' ' || argument[length] == '\t')) return 1;
-        for (; *command_line; command_line++)
-        {
-            if (*command_line == '"') quoted = !quoted;
-            if (!quoted && (*command_line == ' ' || *command_line == '\t')) break;
-        }
-    }
-    return 0;
-}
+#include "arguments.h"
 
 static inline int kingdom_hearts_append_arguments( const char *target, uint16_t machine,
                                                  char *command_line, size_t size )
@@ -63,7 +40,7 @@ static inline int kingdom_hearts_append_arguments( const char *target, uint16_t 
     length = strnlen( command_line, size );
     if (length == size) return 0;
     for (unsigned int i = 0; i < sizeof(arguments) / sizeof(arguments[0]); i++)
-        if (!kingdom_hearts_has_argument( command_line, arguments[i].key ))
+        if (!game_has_argument( command_line, arguments[i].key ))
         {
             missing |= 1u << i;
             needed += strlen( arguments[i].value );
