@@ -82,7 +82,7 @@ static const struct game_settings_profile spiderman_wos_profile = {
     "drive_c/users/steamuser/AppData/Local/Activision/Spider-Man Web of Shadows/Config.xml",
     NULL, 0, spiderman_wos_settings, sizeof(spiderman_wos_settings) / sizeof(spiderman_wos_settings[0]),
     GAME_SETTINGS_XML, "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<r>\n  <s id=\"Version\">7</s>\n</r>\n",
-    { "VideoDesiredW", "VideoDesiredH" }, NULL
+    { "VideoDesiredW", "VideoDesiredH" }, NULL, NULL, NULL
 };
 
 #endif

@@ -2089,6 +2089,7 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
     struct ui *ui = &l->ui;
     unsigned long long forwarder;
     char path[512];
+    int api;
 
     if (!file_exists( p->path ) || l->options->machine_of( p->path, &p->machine ))
     {
@@ -2106,6 +2107,25 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
     }
     /* Autorun ships no Windows DLLs: a card without them is offered them here. */
     if (!launcher_dlls_ready( l->dlls )) return 0;
+    api = game_settings_d3d_api( l->options->runtime_dir, p->path, p->machine );
+    if (api < 0)
+    {
+        ui_message( ui, "Game Settings", "The game's configuration could not be read." );
+        return 0;
+    }
+    if (api && (p->settings.d3d != (api == 11 ? LAUNCHER_D3D_DXVK : LAUNCHER_D3D_DXVK_VKD3D) ||
+                (api == 12 && p->settings.dxvk_source == DXVK_SOURCE_SAREK)))
+    {
+        p->settings.d3d = api == 11 ? LAUNCHER_D3D_DXVK : LAUNCHER_D3D_DXVK_VKD3D;
+        if (api == 12 && p->settings.dxvk_source == DXVK_SOURCE_SAREK)
+        {
+            p->settings.dxvk_source = DXVK_SOURCE_OFFICIAL;
+            p->settings.dxvk_version[0] = 0;
+        }
+        save_program_settings( l, p );
+        if (p->settings.d3d != (api == 11 ? LAUNCHER_D3D_DXVK : LAUNCHER_D3D_DXVK_VKD3D) ||
+            (api == 12 && p->settings.dxvk_source == DXVK_SOURCE_SAREK)) return 0;
+    }
     if (p->settings.d3d != LAUNCHER_D3D_WINE && !prepare_program_graphics( l, p )) return 0;
     p->missing = 0;
     p->launched_order = l->catalog.next_order++;

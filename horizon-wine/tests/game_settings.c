@@ -240,21 +240,21 @@ static void check_moha_settings(void)
     game_settings_close( settings );
 
     strcpy( command, "\"C:\\MOHA.exe\" -log" );
-    assert( game_settings_append_arguments( "MOHA.exe", 0x8664, command, sizeof(command) ) );
+    assert( game_settings_append_arguments( directory, "MOHA.exe", 0x8664, command, sizeof(command) ) );
     assert( !strcmp( command, "\"C:\\MOHA.exe\" -log" ) );
-    assert( game_settings_append_arguments( "moha_setup.exe", 0x014c, command, sizeof(command) ) );
+    assert( game_settings_append_arguments( directory, "moha_setup.exe", 0x014c, command, sizeof(command) ) );
     assert( !strcmp( command, "\"C:\\MOHA.exe\" -log" ) );
     size_t needed = strlen(command) + strlen(profile->arguments) + 2;
-    assert( !game_settings_append_arguments( "MOHA.exe", 0x014c, command, needed - 1 ) );
+    assert( !game_settings_append_arguments( directory, "MOHA.exe", 0x014c, command, needed - 1 ) );
     assert( !strcmp( command, "\"C:\\MOHA.exe\" -log" ) );
-    assert( game_settings_append_arguments( "MOHA.exe", 0x014c, command, needed ) );
+    assert( game_settings_append_arguments( directory, "MOHA.exe", 0x014c, command, needed ) );
     assert( !strncmp( command, "\"C:\\MOHA.exe\" -log -NO_LAUNCHER ", 31 ) );
     assert( strstr( command, " -NOWXWINDOWS " ) );
     assert( strstr( command, "-DEFENGINEINI=\"C:\\users\\steamuser\\Documents\\EA Games\\" ) );
     assert( strlen(command) == needed - 1 );
     memset( command, 'x', sizeof(command) );
-    assert( !game_settings_append_arguments( "MOHA.exe", 0x014c, command, sizeof(command) ) );
-    assert( !game_settings_append_arguments( "MOHA.exe", 0x014c, command, 0 ) );
+    assert( !game_settings_append_arguments( directory, "MOHA.exe", 0x014c, command, sizeof(command) ) );
+    assert( !game_settings_append_arguments( directory, "MOHA.exe", 0x014c, command, 0 ) );
     for (unsigned int i = 0; i < sizeof(command); i++) assert( command[i] == 'x' );
     assert( !unlink( path ) );
     while (strcmp( path, directory ))
@@ -438,7 +438,7 @@ int main(void)
         static const char *const presets[] = { "Low", "High" };
         static const struct game_settings_profile profile = {
             "Another.exe", 0x014c, "other.ini", presets, 2, options, 1,
-            GAME_SETTINGS_INI, NULL, { NULL }, NULL
+            GAME_SETTINGS_INI, NULL, { NULL }, NULL, NULL, NULL
         };
         char value[32], other_path[1024];
         other = game_settings_open( directory, &profile );

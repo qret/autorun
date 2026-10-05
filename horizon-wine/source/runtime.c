@@ -40,6 +40,7 @@
 #include "games/kingdom_hearts.h"
 #include "games/tomb_raider.h"
 #include "games/left4dead.h"
+#include "games/ff7remake.h"
 #include "fex_options.h"
 #include "dxvk_options.h"
 #include "input_profile.h"
@@ -1740,6 +1741,25 @@ static NTSTATUS runtime_apply_startup_compat( const char *target, void *module, 
     int ground_zeroes = ground_zeroes_startup_target( target, nt->FileHeader.Machine );
     const char *fallout_launcher = fallout_startup_launcher( target, nt->FileHeader.Machine );
 
+    if (ff7remake_target( target, nt->FileHeader.Machine ))
+    {
+        const unsigned char jump = 0xeb;
+        for (unsigned int i = 0; i < nt->FileHeader.NumberOfSections; i++)
+        {
+            if (!(section[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+            if (!ff7remake_config_scan( module, size, section[i].VirtualAddress,
+                                       section[i].Misc.VirtualSize, &call_rva )) return STATUS_SUCCESS;
+        }
+        if (!call_rva)
+        {
+            log_line( "[COMPAT] FF7 Remake: configuration gate not recognized; graphics overrides need FFVIIHook" );
+            return STATUS_SUCCESS;
+        }
+        status = runtime_patch_image( module, call_rva, &jump, sizeof(jump) );
+        if (status) return status;
+        log_line( "[COMPAT] FF7 Remake: loose INI configuration enabled" );
+        return STATUS_SUCCESS;
+    }
     if (fallout_launcher)
     {
         for (unsigned int i = 0; i < nt->FileHeader.NumberOfSections; i++)
@@ -1813,6 +1833,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
                                                                    char *dos_path, size_t dos_path_size )
 {
     RTL_USER_PROCESS_PARAMETERS *params;
+    int api = game_settings_d3d_api( WINE_ROOT, target, main_image_info.Machine );
     char nt_path[640], dll_path[1024], current_dir[512];
     char cmdline[1024], args_buf[896], args_path[512];
     char fex_environment[NX_FEX_OPTION_COUNT * 80 + 64];
@@ -1824,6 +1845,8 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     int left4dead = 0;
     NTSTATUS status;
 
+    if (api < 0) return NULL;
+    if (api) runtime_d3d = api == 11 ? LAUNCHER_D3D_DXVK : LAUNCHER_D3D_DXVK_VKD3D;
     if (runtime_d3d != LAUNCHER_D3D_WINE)
     {
         dxvk_resolve_version( runtime_dxvk_source, RUNTIME_DIR, main_image_info.Machine, runtime_dxvk_version, &dxvk );
@@ -1914,10 +1937,11 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
         log_line( "[ARGS] CommandLine='%s'", cmdline_str );
     }
 
-    if (!game_settings_append_arguments( target, main_image_info.Machine, cmdline, sizeof(cmdline) )) return NULL;
+    if (!game_settings_append_arguments( WINE_ROOT, target, main_image_info.Machine, cmdline, sizeof(cmdline) )) return NULL;
     if (!kingdom_hearts_append_arguments( target, main_image_info.Machine, cmdline, sizeof(cmdline) )) return NULL;
     if (!tomb_raider_append_arguments( target, main_image_info.Machine, cmdline, sizeof(cmdline) )) return NULL;
     if (left4dead && !left4dead_append_arguments( cmdline, sizeof(cmdline) )) return NULL;
+    if (api) log_line( "[ARGS] final CommandLine='%s'", cmdline );
 
     chars = strlen( current_dir ) + 1;
     chars += strlen( dll_path ) + 1;

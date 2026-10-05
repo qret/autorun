@@ -21,6 +21,11 @@ static int choice_index( const struct game_setting *option, const char *value )
 {
     for (unsigned int i = 0; i < option->choice_count; i++)
     {
+        if (!option->choices[i].value)
+        {
+            if (!*value) return i;
+            continue;
+        }
         if (!strcasecmp( value, option->choices[i].value )) return i;
         if (option->type == GAME_SETTING_NUMBER || option->type == GAME_SETTING_INTEGER)
         {
@@ -65,7 +70,7 @@ int launcher_game_settings_rows( const struct launcher_game_settings *state,
         struct ui_row *row = rows + count;
 
         snprintf( row->label, sizeof(row->label), "%s", option->label );
-        row->help = option->key;
+        row->help = state->profile->help ? state->profile->help[i] : option->key;
         row->kind = option->choice_count ? UI_ROW_DROPDOWN : UI_ROW_VALUE;
         row->choices = option->choice_count;
         if (!game_settings_get( state->settings, i, value, sizeof(value) ))
@@ -115,8 +120,12 @@ void launcher_game_settings_action( struct launcher_game_settings *state, const 
         const char *chosen;
 
         game_settings_get( state->settings, id - 1, current, sizeof(current) );
-        if (action == UI_ACTION_RESET) chosen = option->initial ? option->initial : option->presets[0];
-        else if (option->choice_count)
+        if (action == UI_ACTION_RESET)
+        {
+            ok = game_settings_reset( state->settings, id - 1 );
+            goto save;
+        }
+        if (option->choice_count)
         {
             struct ui_row *items = calloc( option->choice_count, sizeof(*items) );
             int selected;
@@ -133,9 +142,10 @@ void launcher_game_settings_action( struct launcher_game_settings *state, const 
             if (!launcher_platform_prompt( option->label, current, value, sizeof(value) )) return;
             chosen = value;
         }
-        if (!chosen) return;
-        ok = game_settings_set( state->settings, id - 1, chosen );
+        ok = chosen ? game_settings_set( state->settings, id - 1, chosen ) :
+                      game_settings_reset( state->settings, id - 1 );
     }
+save:
     if (!ok || !game_settings_save( state->settings ))
     {
         game_settings_close( state->settings );

@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "game_settings.h"
+#include "games/arguments.h"
 #include "games/fallout3.h"
 #include "games/fallout4.h"
 #include "games/falloutnv.h"
@@ -121,6 +122,15 @@ static int ini_set( struct game_settings *settings, const char *section, const c
     n = snprintf( line, sizeof(line), "%s%s=%s\r\n",
                   insert && settings->text[insert - 1] != '\n' ? "\r\n" : "", key, value );
     return n >= 0 && (size_t)n < sizeof(line) && ini_replace( settings, insert, insert, line );
+}
+
+static int ini_remove( struct game_settings *settings, const char *section, const char *key )
+{
+    size_t begin, end, value, insert;
+
+    while (ini_find( settings, section, key, &begin, &end, &value, &insert ))
+        if (!ini_replace( settings, begin, end, "" )) return 0;
+    return 1;
 }
 
 static const char *xml_skip( const char *p )
@@ -270,10 +280,13 @@ static int config_set( struct game_settings *settings, const char *section, cons
     return n >= 0 && (size_t)n < sizeof(line) && ini_replace( settings, insert, insert, line );
 }
 
+#include "games/ff7remake_settings.h"
+
 const struct game_settings_profile *game_settings_find( const char *target, uint16_t machine )
 {
     static const struct game_settings_profile *const profiles[] = {
-        &fallout3_profile, &fallout4_profile, &falloutnv_profile, &moha_profile, &spiderman_wos_profile
+        &fallout3_profile, &fallout4_profile, &falloutnv_profile, &moha_profile, &spiderman_wos_profile,
+        &ff7remake_profile
     };
     const char *name = target;
 
@@ -283,11 +296,37 @@ const struct game_settings_profile *game_settings_find( const char *target, uint
     return NULL;
 }
 
-int game_settings_append_arguments( const char *target, uint16_t machine, char *command_line, size_t size )
+int game_settings_d3d_api( const char *root, const char *target, uint16_t machine )
 {
     const struct game_settings_profile *profile = game_settings_find( target, machine );
+    struct game_settings *settings;
+    char value[GAME_SETTINGS_VALUE_SIZE];
+    int api = 0;
+    unsigned int i;
+
+    if (!profile) return 0;
+    for (i = 0; i < profile->count; i++)
+        if (profile->settings[i].type == GAME_SETTING_D3D_API) break;
+    if (i == profile->count) return 0;
+    if (!(settings = game_settings_open( root, profile ))) return -1;
+    if (game_settings_get( settings, i, value, sizeof(value) ))
+    {
+        if (!strcmp( value, "11" )) api = 11;
+        else if (!strcmp( value, "12" )) api = 12;
+    }
+    game_settings_close( settings );
+    return api;
+}
+
+int game_settings_append_arguments( const char *root, const char *target, uint16_t machine,
+                                    char *command_line, size_t size )
+{
+    const struct game_settings_profile *profile = game_settings_find( target, machine );
+    int api = game_settings_d3d_api( root, target, machine );
     size_t length, extra;
 
+    if (api < 0) return 0;
+    if (api && !game_set_d3d_argument( command_line, size, api )) return 0;
     if (!profile || !profile->arguments) return 1;
     length = strnlen( command_line, size );
     extra = strlen( profile->arguments );
@@ -397,13 +436,29 @@ int game_settings_set( struct game_settings *settings, unsigned int index, const
                 !config_set( settings, option->section, settings->profile->pending_resolution[i], "0" )) return 0;
         return 1;
     }
+    if (option->type == GAME_SETTING_D3D_API && strcmp( value, "11" ) && strcmp( value, "12" )) return 0;
     if (option->type == GAME_SETTING_NUMBER || option->type == GAME_SETTING_INTEGER)
     {
         double number = strtod( value, &end );
         if (end == value || *end || !isfinite( number ) || number < 0 || number > 10000000) return 0;
         if (option->type == GAME_SETTING_INTEGER && number != (unsigned int)number) return 0;
     }
-    return config_set( settings, option->section, option->key, value );
+    if (!config_set( settings, option->section, option->key, value )) return 0;
+    return !settings->profile->update || settings->profile->update( settings, index, value );
+}
+
+int game_settings_reset( struct game_settings *settings, unsigned int index )
+{
+    const struct game_setting *option;
+    const char *value;
+
+    if (index >= settings->profile->count) return 0;
+    option = settings->profile->settings + index;
+    value = option->initial ? option->initial : option->presets[0];
+    if (value) return game_settings_set( settings, index, value );
+    if (settings->profile->format != GAME_SETTINGS_INI ||
+        !ini_remove( settings, option->section, option->key )) return 0;
+    return !settings->profile->update || settings->profile->update( settings, index, NULL );
 }
 
 int game_settings_apply_preset( struct game_settings *settings, int preset )
