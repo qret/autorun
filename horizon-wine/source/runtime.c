@@ -39,6 +39,7 @@
 #include "gtaiv_startup.h"
 #include "games/kingdom_hearts.h"
 #include "games/tomb_raider.h"
+#include "games/left4dead.h"
 #include "fex_options.h"
 #include "dxvk_options.h"
 #include "input_profile.h"
@@ -1805,6 +1806,8 @@ static NTSTATUS runtime_apply_startup_compat( const char *target, void *module, 
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS runtime_prepare_left4dead( const char *target, const char *dos_path, int *enabled );
+
 static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *target,
                                                                    UNICODE_STRING *main_nt_name,
                                                                    char *dos_path, size_t dos_path_size )
@@ -1818,6 +1821,8 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     const char *cmdline_str, *dxvk_hud = launcher_hud_values[runtime_dxvk_hud];
     char dxvk_dir[96], vkd3d_dir[96], vkd3d_path[104] = "", graphics_path[208] = "";
     struct dxvk_version dxvk = {0}, vkd3d = {0};
+    int left4dead = 0;
+    NTSTATUS status;
 
     if (runtime_d3d != LAUNCHER_D3D_WINE)
     {
@@ -1827,6 +1832,11 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     }
 
     if (!target_to_dos_path( target, dos_path, dos_path_size )) return NULL;
+    if ((status = runtime_prepare_left4dead( target, dos_path, &left4dead )))
+    {
+        log_line( "[FAIL] Left 4 Dead startup setup status=%08x", status );
+        return NULL;
+    }
     fex_environment_size = runtime_fex_environment( target, fex_environment, sizeof(fex_environment) );
     dos_dirname( dos_path, current_dir, sizeof(current_dir) );
     snprintf( nt_path, sizeof(nt_path), "\\??\\%s", dos_path );
@@ -1907,6 +1917,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     if (!game_settings_append_arguments( target, main_image_info.Machine, cmdline, sizeof(cmdline) )) return NULL;
     if (!kingdom_hearts_append_arguments( target, main_image_info.Machine, cmdline, sizeof(cmdline) )) return NULL;
     if (!tomb_raider_append_arguments( target, main_image_info.Machine, cmdline, sizeof(cmdline) )) return NULL;
+    if (left4dead && !left4dead_append_arguments( cmdline, sizeof(cmdline) )) return NULL;
 
     chars = strlen( current_dir ) + 1;
     chars += strlen( dll_path ) + 1;
@@ -1916,6 +1927,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     chars += strlen( nt_path ) + 1;
     chars += sizeof(runtime_environment) + 2 * strlen( graphics_path ) + strlen( dxvk_hud ) - 1;
     chars += fex_environment_size + runtime_extra_environment_size;
+    if (left4dead) chars += sizeof(LEFT4DEAD_ENVIRONMENT) - 1;
     size = sizeof(*params) + chars * sizeof(WCHAR);
 
     if (!(params = calloc( 1, size ))) return NULL;
@@ -1963,6 +1975,9 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     }
     for (i = 0; i < fex_environment_size; i++) *cursor++ = (unsigned char)fex_environment[i];
     for (i = 0; i < runtime_extra_environment_size; i++) *cursor++ = (unsigned char)runtime_extra_environment[i];
+    if (left4dead)
+        for (i = 0; i < sizeof(LEFT4DEAD_ENVIRONMENT) - 1; i++)
+            *cursor++ = (unsigned char)LEFT4DEAD_ENVIRONMENT[i];
     *cursor++ = 0;
     params->EnvironmentSize = (cursor - (WCHAR *)params->Environment) * sizeof(WCHAR);
 
@@ -2578,6 +2593,65 @@ static void runtime_witcher_install_folder( const char *target )
         NtClose( key );
     }
     log_line( "[GAME] The Witcher: InstallFolder=%s status=%08x", dos, (unsigned)status );
+}
+
+static NTSTATUS runtime_prepare_left4dead( const char *target, const char *dos_path, int *enabled )
+{
+    static const char registry_path[] = "Software\\Valve\\Steam\\ActiveProcess";
+    const char *names[] = { "ActiveUser", "pid", "SteamClientDll", "SteamClientDll64", "Universe" };
+    const ULONG dwords[] = { 0x771f810d, GetCurrentProcessId() };
+    struct launcher_kv config;
+    char directory[512], path[768], exe[256], appid[32], client[512], client64[512], dos_directory[512];
+    WCHAR wide_path[768], wide_name[32];
+    UNICODE_STRING name;
+    HANDLE key;
+    NTSTATUS status;
+
+    *enabled = 0;
+    if (!left4dead_target( target, main_image_info.Machine )) return STATUS_SUCCESS;
+    path_dirname( target, directory, sizeof(directory) );
+    if (!join_path( path, sizeof(path), directory, "ColdClientLoader.ini" ) ||
+        !launcher_kv_load( &config, path ) ||
+        !launcher_kv_get( &config, "Exe", exe, sizeof(exe) ) || strcasecmp( exe, "left4dead.exe" ) ||
+        !launcher_kv_get( &config, "AppId", appid, sizeof(appid) ) || strcmp( appid, "500" ) ||
+        !launcher_kv_get( &config, "SteamClientDll", client, sizeof(client) ) ||
+        !launcher_kv_get( &config, "SteamClient64Dll", client64, sizeof(client64) )) return STATUS_SUCCESS;
+    for (unsigned int i = 0; i < 2; i++)
+    {
+        const char *file = i ? client64 : client;
+        if (!file[0] || strpbrk( file, ":/\\" ) ||
+            !join_path( path, sizeof(path), directory, file ) || !file_exists( path )) return STATUS_SUCCESS;
+    }
+    if ((status = horizon_registry_make_session_key( registry_path ))) return status;
+    status = runtime_create_registry_path(
+        "\\Registry\\User\\S-1-5-21-0-0-0-1000\\Software\\Valve\\Steam\\ActiveProcess", &key );
+    if (status) return status;
+    dos_dirname( dos_path, dos_directory, sizeof(dos_directory) );
+    for (unsigned int i = 0; i < ARRAY_SIZE(names); i++)
+    {
+        size_t length = strlen( names[i] );
+        for (size_t j = 0; j <= length; j++) wide_name[j] = (unsigned char)names[i][j];
+        name.Buffer = wide_name;
+        name.Length = length * sizeof(WCHAR);
+        name.MaximumLength = sizeof(wide_name);
+        if (i < 2) status = NtSetValueKey( key, &name, 0, REG_DWORD, &dwords[i], sizeof(dwords[i]) );
+        else
+        {
+            int count = i == 4 ? snprintf( path, sizeof(path), "Public" ) :
+                                snprintf( path, sizeof(path), "%s\\%s", dos_directory, i == 2 ? client : client64 );
+            if (count < 0 || (size_t)count >= sizeof(path)) { status = STATUS_NAME_TOO_LONG; break; }
+            for (int j = 0; j <= count; j++) wide_path[j] = (unsigned char)path[j];
+            status = NtSetValueKey( key, &name, 0, REG_SZ, wide_path, (count + 1) * sizeof(WCHAR) );
+        }
+        if (status) break;
+    }
+    NtClose( key );
+    if (!status)
+    {
+        *enabled = 1;
+        log_line( "[COMPAT] Left 4 Dead: direct startup enabled" );
+    }
+    return status;
 }
 
 static NTSTATUS runtime_prepare_prince_of_persia( const char *target )

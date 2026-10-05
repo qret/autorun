@@ -26,6 +26,7 @@ extern ULONG_PTR horizon_get_system_affinity_mask(void);
 extern unsigned int horizon_query_process_affinity( unsigned int handle, ULONG_PTR *mask );
 extern ULONG_PTR horizon_get_current_thread_affinity(void);
 extern unsigned int horizon_get_processor_count(void);
+extern unsigned int horizon_registry_make_session_key( const char *path );
 /* The runtime's thread profiler (horizon-wine/source/thread_profile.c); weak,
  * since the ntdll test executables link without the runtime. */
 extern void wine_nx_thread_register( char kind, unsigned int tid, void *teb ) __attribute__((weak));

@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <stddef.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -382,6 +383,57 @@ static void test_batching(void)
     horizon_reg_release(&horizon_registry, key);
     puts("Registry batching: unchanged values, hive-specific delete, retry, concurrent mutation and unlocked I/O passed");
 }
+static void test_session_key(void)
+{
+    static const char path[] = "Software\\Valve\\Steam\\ActiveProcess";
+    unsigned short wide_path[256], name[32];
+    unsigned int length = wide(wide_path, path), name_length = wide(name, "pid"), index;
+    uint32_t original = 27, running = 1;
+    struct horizon_reg_key *key, *saved;
+    char file_path[512], text[65536];
+    FILE *file;
+    size_t size;
+
+    assert(horizon_registry_make_session_key(NULL) == HORIZON_REG_INVALID_PARAMETER);
+    assert(horizon_registry_make_session_key("\\bad") == HORIZON_REG_INVALID_PARAMETER);
+    assert(!horizon_registry_make_session_key(path));
+    assert(!horizon_reg_open(&horizon_registry, horizon_registry_hives[1], wide_path, length, 0, &key));
+    assert(key->flags & HORIZON_REG_FLAG_VOLATILE);
+    assert(!horizon_reg_set_value(&horizon_registry, key, name, name_length, HORIZON_REG_DWORD, &running, 4));
+    assert(horizon_registry_flush());
+    snprintf(file_path, sizeof(file_path), "%s" HORIZON_REGISTRY_SUBDIR "user.reg", registry_dir);
+    file = fopen(file_path, "rb"); assert(file);
+    size = fread(text, 1, sizeof(text) - 1, file); fclose(file); text[size] = 0;
+    assert(!strstr(text, "ActiveProcess"));
+    assert(!horizon_reg_delete(&horizon_registry, key));
+    horizon_reg_release(&horizon_registry, key);
+
+    saved = horizon_reg_create_ascii(&horizon_registry, horizon_registry_hives[1], path);
+    assert(saved);
+    assert(!horizon_reg_set_value(&horizon_registry, saved, name, name_length, HORIZON_REG_DWORD, &original, 4));
+    assert(!horizon_registry_make_session_key(path));
+    assert(!horizon_registry_make_session_key(path));
+    assert(!horizon_reg_open(&horizon_registry, horizon_registry_hives[1], wide_path, length, 0, &key));
+    assert(key != saved && (key->flags & HORIZON_REG_FLAG_VOLATILE));
+    assert(!memcmp(horizon_reg_find_value(key, name, name_length, &index)->data, &original, 4));
+    assert(!horizon_reg_set_value(&horizon_registry, key, name, name_length, HORIZON_REG_DWORD, &running, 4));
+    assert(horizon_registry_flush());
+    file = fopen(file_path, "rb"); assert(file);
+    size = fread(text, 1, sizeof(text) - 1, file); fclose(file); text[size] = 0;
+    assert(strstr(text, "ActiveProcess") && strstr(text, "\"pid\"=dword:0000001b"));
+    assert(!horizon_reg_delete(&horizon_registry, key));
+    assert(horizon_registry_flush());
+    file = fopen(file_path, "rb"); assert(file);
+    size = fread(text, 1, sizeof(text) - 1, file); fclose(file); text[size] = 0;
+    assert(strstr(text, "ActiveProcess") && strstr(text, "\"pid\"=dword:0000001b"));
+    horizon_reg_release(&horizon_registry, key);
+    horizon_reg_release(&horizon_registry, horizon_registry_session_key);
+    horizon_reg_release(&horizon_registry, horizon_registry_session_saved->parent);
+    horizon_reg_release(&horizon_registry, horizon_registry_session_saved);
+    horizon_registry_session_key = horizon_registry_session_saved = NULL;
+    puts("Registry session: transient values and existing persisted values preserved");
+}
+
 int main(void)
 {
     unsigned int key, user, i;
@@ -428,6 +480,7 @@ int main(void)
     for(i=0;i<handle_count;i++) horizon_server_free_object(handles[i].object);
     test_batching();
     test_machine_identity();
+    test_session_key();
     test_save_and_load();
     puts("Registry server: protocol layouts, HKCU identity, COM/audio seeds, truncated replies, notifications and saved hives passed");
     return 0;

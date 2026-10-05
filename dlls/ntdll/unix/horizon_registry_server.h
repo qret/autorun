@@ -109,6 +109,8 @@ struct horizon_registry_path
     const struct horizon_registry_path *parent;  /* NULL for a child of the hive */
 };
 
+static struct horizon_reg_key *horizon_registry_session_key, *horizon_registry_session_saved;
+
 /* server/registry.c's dump_path: elements are separated by an escaped backslash. */
 static void horizon_registry_save_path( FILE *file, const struct horizon_registry_path *path )
 {
@@ -147,6 +149,11 @@ static void horizon_registry_save_subkeys( FILE *file, const struct horizon_reg_
     for (i = 0; i < key->subkey_count; i++)
     {
         child.key = key->subkeys[i];
+        horizon_registry_save_subkeys( file, child.key, &child );
+    }
+    if (horizon_registry_session_saved && key == horizon_registry_session_saved->parent)
+    {
+        child.key = horizon_registry_session_saved;
         horizon_registry_save_subkeys( file, child.key, &child );
     }
 }
@@ -342,6 +349,75 @@ static unsigned int horizon_registry_init(void)
     memset( horizon_registry_saved, 0, sizeof(horizon_registry_saved) );
     horizon_registry.changed = horizon_registry_changed;
     return 0;
+}
+
+static int horizon_registry_ascii( const char *text, unsigned short *wide, size_t capacity )
+{
+    size_t length = strlen( text );
+
+    if (length >= capacity) return 0;
+    for (size_t i = 0; i <= length; i++)
+    {
+        if ((unsigned char)text[i] > 127) return 0;
+        wide[i] = (unsigned char)text[i];
+    }
+    return 1;
+}
+
+/* Session overrides must not replace persisted launcher settings. */
+unsigned int horizon_registry_make_session_key( const char *path )
+{
+    unsigned short name[512];
+    struct horizon_reg_key *key = NULL, *session;
+    unsigned int status, index;
+
+    if (!path || !*path || *path == '\\' ||
+        !horizon_registry_ascii( path, name, sizeof(name) / sizeof(name[0]) ))
+        return HORIZON_REG_INVALID_PARAMETER;
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if ((status = horizon_registry_init())) goto done;
+    status = horizon_reg_open( &horizon_registry, horizon_registry_hives[1], name, strlen(path) * 2, 0, &key );
+    if (status == HORIZON_REG_NAME_NOT_FOUND)
+    {
+        session = horizon_reg_create_ascii( &horizon_registry, horizon_registry_hives[1], path );
+        status = session ? HORIZON_REG_SUCCESS : HORIZON_REG_NO_MEMORY;
+        if (session) session->flags |= HORIZON_REG_FLAG_VOLATILE;
+        goto done;
+    }
+    if (status || (key->flags & HORIZON_REG_FLAG_VOLATILE)) goto done;
+    if (horizon_registry_session_key || key->subkey_count || (key->flags & HORIZON_REG_FLAG_SYMLINK))
+    {
+        status = HORIZON_REG_INVALID_PARAMETER;
+        goto done;
+    }
+    if (!(session = horizon_reg_alloc_key( key->name, key->namelen, horizon_registry_now() )))
+    {
+        status = HORIZON_REG_NO_MEMORY;
+        goto done;
+    }
+    session->flags |= HORIZON_REG_FLAG_VOLATILE;
+    for (unsigned int i = 0; i < key->value_count; i++)
+    {
+        const struct horizon_reg_value *value = &key->values[i];
+        status = horizon_reg_set_value( &horizon_registry, session, value->name, value->namelen,
+                                        value->type, value->data, value->len );
+        if (status)
+        {
+            horizon_reg_release( &horizon_registry, session );
+            goto done;
+        }
+    }
+    horizon_reg_find_subkey( key->parent, key->name, key->namelen, &index );
+    session->parent = key->parent;
+    key->parent->subkeys[index] = session;
+    horizon_registry_session_key = session;
+    horizon_registry_session_saved = key;
+    session->refs++;
+    key->parent->refs++;
+done:
+    if (key) horizon_reg_release( &horizon_registry, key );
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return status;
 }
 
 /* The in-process server has a single local user and no impersonation tokens.
