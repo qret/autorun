@@ -17186,8 +17186,8 @@ __attribute__((weak)) NTSTATUS virtual_handle_fault( struct thread_data *data, E
  * libnx invokes this handler after svcReturnFromException, on its exception
  * stack, so unwinding to an active user-mode setjmp does not strand a kernel
  * exception. Native Wine faults retain the existing handling path. */
-extern BOOL wine_nx_box64_handle_fault( ULONG_PTR address, ULONG access, ULONG_PTR pc,
-                                        const unsigned long long *x ) __attribute__((weak));
+extern BOOL wine_nx_box64_handle_fault( ULONG_PTR address, ULONG access,
+                                        const ARM64_NT_CONTEXT *context ) __attribute__((weak));
 /* Dynarec builds: the x86 instruction and registers behind a pc in translated code. */
 extern int wine_nx_box64_describe_native_pc( ULONG_PTR pc, const unsigned long long *x,
                                              char *buf, size_t size ) __attribute__((weak));
@@ -17563,13 +17563,15 @@ unhandled_exception:
         if (wine_nx_box64_describe_native_pc &&
             wine_nx_box64_describe_native_pc( ctx->pc.x, x, buf, sizeof(buf) ))
             wine_nx_runtime_trace( buf );
-        /* ESR.FnV invalidates FAR. Never consume instruction aborts or faults
-         * outside the active interpreter's 32-bit guest address space. */
-        /* A guest's data abort goes back to it as an access violation, with
-         * whether it wrote (ESR ISS.WnR) and the registers it was in. */
+        /* ESR.FnV invalidates FAR. Only data aborts enter the guest fault boundary. */
         if ((exception_class == 0x24 || exception_class == 0x25) && !(esr & (1u << 10)) &&
             wine_nx_box64_handle_fault)
-            wine_nx_box64_handle_fault( (ULONG_PTR)ctx->far.x, (esr >> 6) & 1, ctx->pc.x, x );
+        {
+            ARM64_NT_CONTEXT context;
+
+            horizon_exception_context( ctx, &context );
+            wine_nx_box64_handle_fault( (ULONG_PTR)ctx->far.x, (esr >> 6) & 1, &context );
+        }
         snprintf( buf, sizeof(buf), "[EXC] unhandled status=0x%08x; parking thread", (unsigned)status );
         wine_nx_runtime_trace( buf );
         /* Park rather than returning: libnx's exception_returnentry would

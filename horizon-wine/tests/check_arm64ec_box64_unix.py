@@ -152,7 +152,8 @@ void wine_nx_box64_invalidate( uintptr_t address, size_t size, int destroy )
 NTSTATUS wine_nx_box64_run_amd64( AMD64_CONTEXT *context, ULONG_PTR gs_base,
                                   struct wine_nx_amd64_state *state,
                                   const struct wine_nx_amd64_host *host, void *opaque,
-                                  ULONG_PTR completion, ULONGLONG budget, ULONGLONG *executed )
+                                  ULONG_PTR completion, ULONGLONG budget, ULONGLONG *executed,
+                                  EXCEPTION_RECORD *exception )
 {{
     unsigned char bytes[8];
 
@@ -169,6 +170,15 @@ NTSTATUS wine_nx_box64_run_amd64( AMD64_CONTEXT *context, ULONG_PTR gs_base,
         engine_probe_status = host->read( opaque, engine_probe_read, bytes, sizeof(bytes) );
     if (engine_probe_native)
         engine_probe_native_result = host->is_native( opaque, engine_probe_native );
+    memset( exception, 0, sizeof(*exception) );
+    if (engine_status == STATUS_ACCESS_VIOLATION)
+    {{
+        exception->ExceptionCode = engine_status;
+        exception->ExceptionAddress = (void *)(ULONG_PTR)context->Rip;
+        exception->NumberParameters = 2;
+        exception->ExceptionInformation[0] = 1;
+        exception->ExceptionInformation[1] = 0x7ff812345000ull;
+    }}
     return engine_status;
 }}
 
@@ -377,7 +387,9 @@ static void test_engine_exits_and_callbacks(void)
     assert( run.exit_kind == WINEBOX64EC_EXIT_EXCEPTION && run.exception_record );
     exception = (EXCEPTION_RECORD *)(ULONG_PTR)run.exception_record;
     assert( exception->ExceptionCode == (DWORD)STATUS_ACCESS_VIOLATION );
-    assert( exception->ExceptionFlags == EXCEPTION_NONCONTINUABLE );
+    assert( !exception->ExceptionFlags && exception->NumberParameters == 2 );
+    assert( exception->ExceptionInformation[0] == 1 );
+    assert( exception->ExceptionInformation[1] == 0x7ff812345000ull );
     assert( exception->ExceptionAddress == (void *)ec_target );
 
     engine_status = STATUS_TIMEOUT;

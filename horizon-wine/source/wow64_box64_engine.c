@@ -54,6 +54,8 @@ struct nx_engine
     ULONG_PTR code_page; /* page of the last checked instruction fetch; 1 = none */
     ULONGLONG remaining, executed;
     NTSTATUS status;
+    ULONG_PTR fault_address;
+    ULONG fault_access;
     pthread_mutex_t *held_mutex;
     int dynarec;    /* running under Box64's dynarec (EmuRun) rather than Run */
     int is32bits;
@@ -181,10 +183,12 @@ void wine_nx_box64_last_fault( ULONG *address, ULONG *access )
 
 static void stop_engine( x64emu_t *emu, NTSTATUS status );
 
-static void stop_fault( x64emu_t *emu, ULONG address, ULONG access )
+static void stop_fault( x64emu_t *emu, ULONG_PTR address, ULONG access )
 {
-    fault_address = address;
-    fault_access = access;
+    struct nx_engine *engine = (struct nx_engine *)emu;
+
+    engine->fault_address = address;
+    engine->fault_access = access;
     stop_engine( emu, STATUS_ACCESS_VIOLATION );
 }
 
@@ -214,18 +218,17 @@ static void stop_engine( x64emu_t *emu, NTSTATUS status )
 
 
 #ifdef WINE_NX_BOX64_DYNAREC
-extern int wine_nx_box64_pc_to_x86( uintptr_t pc, uintptr_t *x86 );
-extern int wine_nx_box64_is_translated_pc( uintptr_t pc );
+extern int wine_nx_box64_recover_state( x64emu_t *emu, const ARM64_NT_CONTEXT *context );
 
-/* Box64's adjustregs for 32-bit code: an instruction that faults part-way has
- * already moved a register -- POP to memory has popped, MOVS has advanced ESI
- * with its post-indexed load -- which Windows reports as not yet done. */
+/* Undo register updates made before a faulting MOVS store or POP to memory. */
 static void adjust_partial_instruction( x64emu_t *emu, ULONG_PTR pc )
 {
-    const unsigned char *code = (const unsigned char *)(uintptr_t)emu->ip.dword[0];
+    const unsigned char *code = (const unsigned char *)(uintptr_t)emu->ip.q[0];
     unsigned int prefix = 0, operand16 = 0;
+    int is32bits = emu->segs[_CS] == 0x23;
 
-    while (prefix < 4 && (code[prefix] == 0xf2 || code[prefix] == 0xf3 || code[prefix] == 0x66))
+    while (prefix < 15 && (code[prefix] == 0xf2 || code[prefix] == 0xf3 || code[prefix] == 0x66 ||
+                          (!is32bits && code[prefix] >= 0x40 && code[prefix] <= 0x4f)))
         if (code[prefix++] == 0x66) operand16 = 1;
     if (code[prefix] == 0xa4 || code[prefix] == 0xa5)
     {
@@ -236,35 +239,30 @@ static void adjust_partial_instruction( x64emu_t *emu, ULONG_PTR pc )
         {
             int offset = (int)(opcode << 11) >> 23;
 
-            emu->regs[_SI].dword[0] -= offset;
+            emu->regs[_SI].q[0] -= offset;
+            if (is32bits) emu->regs[_SI].q[0] = emu->regs[_SI].dword[0];
         }
     }
     else if (code[prefix] == 0x8f && (code[prefix + 1] & 0xc0) != 0xc0)
-        emu->regs[_SP].dword[0] -= operand16 ? 2 : 4;
-}
-
-static void recover_translated_state( x64emu_t *emu, ULONG_PTR pc, const unsigned long long *x )
-{
-    uintptr_t x86;
-    unsigned int i;
-
-    if (!wine_nx_box64_is_translated_pc( pc ) || !wine_nx_box64_pc_to_x86( pc, &x86 ) || x86 > 0xffffffffu)
-        return;
-    for (i = 0; i < 8; i++) emu->regs[i].q[0] = x[10 + i];  /* EAX ECX EDX EBX ESP EBP ESI EDI */
-    emu->eflags.x64 = x[26];
-    emu->df = d_none;
-    emu->ip.q[0] = x86;
-    adjust_partial_instruction( emu, pc );
+    {
+        emu->regs[_SP].q[0] -= operand16 ? 2 : is32bits ? 4 : 8;
+        if (is32bits) emu->regs[_SP].q[0] = emu->regs[_SP].dword[0];
+    }
 }
 #endif
 
-BOOL wine_nx_box64_handle_fault( ULONG_PTR address, ULONG access, ULONG_PTR pc,
-                                 const unsigned long long *x )
+BOOL wine_nx_box64_handle_fault( ULONG_PTR address, ULONG access, const ARM64_NT_CONTEXT *context )
 {
-    /* A fault in the alias window is the guest's at its own address. */
+    int recovered = 0;
+    BOOL guest_address;
+
+    /* A fault in the alias window is the guest's at its own address: taken off
+     * before anything below asks whether the address is the guest's. */
     if (wine_nx_box64_window_base && address - wine_nx_box64_window_base < 0x8000000)
         address -= wine_nx_box64_window_base;
-    if (!active_engine || !guest_address_valid( active_engine, address, 1 )) return FALSE;
+    if (!active_engine) return FALSE;
+    guest_address = guest_address_valid( active_engine, address, 1 );
+    if (!guest_address && active_engine->is32bits) return FALSE;
 #ifdef WINE_NX_BOX64_DYNAREC
     extern void *current_helper;
     extern int fillblock_active;
@@ -272,7 +270,7 @@ BOOL wine_nx_box64_handle_fault( ULONG_PTR address, ULONG access, ULONG_PTR pc,
     /* A compiler can read past the code the guest will actually execute.
      * Enter Box64's FillBlock recovery while its jump buffer is live. The lock
      * alone is insufficient: hash validation also runs under it. */
-    if (active_engine->held_mutex == &core_context.mutex_dyndump && current_helper && fillblock_active)
+    if (guest_address && active_engine->held_mutex == &core_context.mutex_dyndump && current_helper && fillblock_active)
     {
         extern void cancelFillBlock(void);
 #ifdef __SWITCH__
@@ -290,17 +288,16 @@ BOOL wine_nx_box64_handle_fault( ULONG_PTR address, ULONG access, ULONG_PTR pc,
 #endif
         cancelFillBlock();
     }
-    /* The guest's own fault, which its exception handlers are to see: in
-     * translated code the x86 state is in the native registers, as Box64's
-     * copyUCTXreg2Emu takes it, and the instruction is the one the block maps
-     * the native pc to. */
-    if (active_engine->is32bits && x && active_engine->dynarec)
-        recover_translated_state( &active_engine->emu, pc, x );
+    if (context && active_engine->dynarec)
+    {
+        recovered = wine_nx_box64_recover_state( &active_engine->emu, context );
+        if (recovered) adjust_partial_instruction( &active_engine->emu, context->Pc );
+    }
 #else
-    (void)pc; (void)x;  /* the interpreter keeps each instruction's state as it goes */
+    (void)context;
 #endif
-    if (active_engine->is32bits) stop_fault( &active_engine->emu, address, access );
-    stop_engine( &active_engine->emu, STATUS_ACCESS_VIOLATION );
+    if (!guest_address && !recovered) return FALSE;
+    stop_fault( &active_engine->emu, address, access );
     return TRUE;
 }
 
@@ -355,8 +352,7 @@ int wine_nx_box64_before_instruction( x64emu_t *emu, uintptr_t pc )
         stop_engine( emu, STATUS_NOT_SUPPORTED );
     if (!guest_address_valid( engine, pc, 1 ))
     {
-        if (engine->is32bits) stop_fault( emu, pc > UINT32_MAX ? UINT32_MAX : pc, 8 );
-        stop_engine( emu, STATUS_ACCESS_VIOLATION );
+        stop_fault( emu, engine->is32bits && pc > UINT32_MAX ? UINT32_MAX : pc, 8 );
     }
     if ((engine->is32bits &&
          (pc == engine->gates->syscall || pc == engine->gates->unix_call ||
@@ -374,9 +370,7 @@ int wine_nx_box64_before_instruction( x64emu_t *emu, uintptr_t pc )
     {
         if (!guest_address_valid( engine, pc, prefix + 1 ))
         {
-            if (engine->is32bits)
-                stop_fault( emu, pc + prefix > UINT32_MAX ? UINT32_MAX : pc + prefix, 8 );
-            stop_engine( emu, STATUS_ACCESS_VIOLATION );
+            stop_fault( emu, engine->is32bits && pc + prefix > UINT32_MAX ? UINT32_MAX : pc + prefix, 8 );
         }
         status = fetch_code_byte( engine, pc + prefix, &opcode );
         if (status == STATUS_ACCESS_VIOLATION) stop_fault( emu, pc + prefix, 8 );
@@ -416,8 +410,7 @@ void CheckExec( x64emu_t *emu, uintptr_t pc )
     NTSTATUS status;
     if (!guest_address_valid( engine, pc, 1 ))
     {
-        if (engine->is32bits) stop_fault( emu, pc > UINT32_MAX ? UINT32_MAX : pc, 8 );
-        stop_engine( emu, STATUS_ACCESS_VIOLATION );
+        stop_fault( emu, engine->is32bits && pc > UINT32_MAX ? UINT32_MAX : pc, 8 );
     }
     if ((engine->is32bits &&
          (pc == engine->gates->syscall || pc == engine->gates->unix_call ||
@@ -429,7 +422,8 @@ void CheckExec( x64emu_t *emu, uintptr_t pc )
 
 void EmitSignal( x64emu_t *emu, int sig, void *addr, int code )
 {
-    (void)addr; (void)code;
+    (void)code;
+    if (sig == X64_SIGSEGV) stop_fault( emu, (ULONG_PTR)addr, 0 );
     stop_engine( emu, sig == X64_SIGTRAP ? STATUS_BREAKPOINT :
                       sig == X64_SIGSEGV ? STATUS_ACCESS_VIOLATION : STATUS_ILLEGAL_INSTRUCTION );
 }
@@ -922,6 +916,8 @@ NTSTATUS wine_nx_box64_run( I386_CONTEXT *context, ULONG fs_base,
         status = wine_nx_wow64_dispatch_gate( context, gates, host, opaque );
         if (status) break;
     }
+    fault_address = engine->fault_address;
+    fault_access = engine->fault_access;
     if (executed) *executed = engine->executed;
     __atomic_add_fetch( &wine_nx_box64_executed_total, engine->executed, __ATOMIC_RELAXED );
     __atomic_add_fetch( &wine_nx_box64_runs_total, 1, __ATOMIC_RELAXED );
@@ -934,7 +930,8 @@ NTSTATUS wine_nx_box64_run( I386_CONTEXT *context, ULONG fs_base,
 NTSTATUS wine_nx_box64_run_amd64( AMD64_CONTEXT *context, ULONG_PTR gs_base,
                                  struct wine_nx_amd64_state *state,
                                  const struct wine_nx_amd64_host *host, void *opaque,
-                                 ULONG_PTR completion, ULONGLONG budget, ULONGLONG *executed )
+                                 ULONG_PTR completion, ULONGLONG budget, ULONGLONG *executed,
+                                 EXCEPTION_RECORD *exception )
 {
     static uint32_t parity[8] = {0x96696996,0x69969669,0x69969669,0x96696996,
                                 0x69969669,0x96696996,0x96696996,0x69969669};
@@ -948,6 +945,7 @@ NTSTATUS wine_nx_box64_run_amd64( AMD64_CONTEXT *context, ULONG_PTR gs_base,
 #endif
 
     if (executed) *executed = 0;
+    if (exception) exception->ExceptionCode = 0;
     if (!context || !state || !host || !host->read || !host->is_native ||
         !host->address_limit || !budget ||
         gs_base >= host->address_limit || (completion && completion >= host->address_limit))
@@ -1010,6 +1008,21 @@ NTSTATUS wine_nx_box64_run_amd64( AMD64_CONTEXT *context, ULONG_PTR gs_base,
         status = export_context_amd64( engine, context );
         memcpy( state->mmx, engine->emu.mmx, sizeof(state->mmx) );
         if (engine->status) status = engine->status;
+    }
+    if (exception && status && status != STATUS_TIMEOUT && status != STATUS_EMULATION_SYSCALL)
+    {
+        memset( exception, 0, sizeof(*exception) );
+        exception->ExceptionCode = status;
+        exception->ExceptionAddress = (void *)(ULONG_PTR)context->Rip;
+        if (status == STATUS_ACCESS_VIOLATION)
+        {
+            exception->NumberParameters = 2;
+            exception->ExceptionInformation[0] = engine->fault_access;
+            exception->ExceptionInformation[1] = engine->fault_address;
+        }
+        else if (status != STATUS_ILLEGAL_INSTRUCTION && status != STATUS_INTEGER_DIVIDE_BY_ZERO &&
+                 status != STATUS_BREAKPOINT)
+            exception->ExceptionFlags = EXCEPTION_NONCONTINUABLE;
     }
     if (executed) *executed = engine->executed;
     __atomic_add_fetch( &wine_nx_box64_executed_total, engine->executed, __ATOMIC_RELAXED );

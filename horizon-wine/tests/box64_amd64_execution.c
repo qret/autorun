@@ -4,11 +4,15 @@
 #endif
 #include <assert.h>
 #include <stdint.h>
+#include <signal.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include "amd64_box64_engine.h"
+#include "wow64_box64_engine.h"
+#include "box64_fault_context.h"
 
 #define BASE UINT64_C(0x1010000000)
 #define SIZE UINT64_C(0x20000)
@@ -20,7 +24,17 @@ struct fixture
     unsigned char *memory;
     BOOL native[SIZE / 0x1000];
     struct wine_nx_amd64_state state;
+    EXCEPTION_RECORD exception;
 };
+
+static void operand_fault_handler( int signal, siginfo_t *info, void *context )
+{
+    ARM64_NT_CONTEXT native;
+    ULONG access = capture_fault_context( context, &native );
+
+    wine_nx_box64_handle_fault( (ULONG_PTR)info->si_addr, access, &native );
+    _Exit( 128 + signal );
+}
 
 static NTSTATUS read_guest( void *opaque, ULONG_PTR address, void *buffer, SIZE_T size )
 {
@@ -71,7 +85,7 @@ static NTSTATUS run( struct fixture *fixture, AMD64_CONTEXT *context, ULONG_PTR 
 {
     ULONGLONG executed = 0;
     return wine_nx_box64_run_amd64( context, BASE + 0x6000, &fixture->state, &host, fixture,
-                                    completion, 10000, &executed );
+                                    completion, 10000, &executed, &fixture->exception );
 }
 
 static void emit8( unsigned char **cursor, unsigned int value )
@@ -418,7 +432,7 @@ static void test_mmx_context( struct fixture *fixture )
     put_code( fixture, 0xc00, timeout, 2 );
     context.Rip = BASE + 0xc00;
     assert( wine_nx_box64_run_amd64( &context, BASE + 0x6000, &fixture->state, &host, fixture,
-                                     0, 1, NULL ) == STATUS_TIMEOUT );
+                                     0, 1, NULL, NULL ) == STATUS_TIMEOUT );
     assert( context.Rip == BASE + 0xc01 );
 #endif
     context.Rip = BASE + 0xb00;
@@ -439,7 +453,7 @@ static void test_mmx_context( struct fixture *fixture )
     init_context( &context, BASE + 0xb80 );
     memset( context.FltSave.FloatRegisters, 0x5a, sizeof(context.FltSave.FloatRegisters) );
     assert( wine_nx_box64_run_amd64( &context, BASE + 0x6000, &fixture->state, &host, fixture,
-                                     0, 2, NULL ) == STATUS_TIMEOUT );
+                                     0, 2, NULL, NULL ) == STATUS_TIMEOUT );
     assert( context.Rip == BASE + 0xb80 + 14 );
     assert( run( fixture, &context, 0 ) == STATUS_SUCCESS );
     memcpy( &output, fixture->memory + 0x7230, sizeof(output) );
@@ -460,7 +474,85 @@ static void test_unsupported( struct fixture *fixture )
     init_context( &context, BASE + 0x900 );
     context.ContextFlags |= CONTEXT_AMD64_XSTATE;
     assert( wine_nx_box64_run_amd64( &context, BASE + 0x6000, &fixture->state, &host, fixture,
-                                     0, 100, NULL ) == STATUS_NOT_SUPPORTED );
+                                     0, 100, NULL, NULL ) == STATUS_NOT_SUPPORTED );
+}
+
+static void test_fault_context( struct fixture *fixture )
+{
+    const ULONG_PTR fault_address = BASE + SIZE - 0x1000;
+    AMD64_CONTEXT context;
+    unsigned char code[256], *cursor;
+    ULONGLONG expected[16];
+    ULONG_PTR fault_pc;
+    unsigned int i, access;
+
+    for (access = 0; access <= 1; access++)
+    {
+        cursor = code;
+        for (i = 0; i < 16; i++)
+        {
+            expected[i] = i == 4 ? STACK : UINT64_C(0x123456789abc0000) + i;
+            if (i != 4) mov_imm64( &cursor, i, expected[i] );
+        }
+        mov_imm64( &cursor, 0, fault_address ); expected[0] = fault_address;
+        emit8( &cursor, 0x66 ); emit8( &cursor, 0x45 ); emit8( &cursor, 0x0f );
+        emit8( &cursor, 0xd4 ); emit8( &cursor, 0xc1 ); /* paddq xmm8,xmm9 */
+        emit8( &cursor, 0x31 ); emit8( &cursor, 0xc9 ); /* xor ecx,ecx */
+        expected[1] = 0;
+        fault_pc = BASE + 0x2000 + (cursor - code);
+        emit8( &cursor, 0x48 ); emit8( &cursor, access ? 0x89 : 0x8b ); emit8( &cursor, 0x18 );
+        jump_native( &cursor );
+        put_code( fixture, 0x2000, code, cursor - code );
+        init_context( &context, BASE + 0x2000 );
+        context.FltSave.XmmRegisters[8].Low = 3;
+        context.FltSave.XmmRegisters[8].High = 4;
+        context.FltSave.XmmRegisters[9].Low = 5;
+        context.FltSave.XmmRegisters[9].High = 6;
+        assert( !mprotect( (void *)fault_address, 0x1000, PROT_NONE ) );
+        assert( run( fixture, &context, 0 ) == STATUS_ACCESS_VIOLATION );
+        assert( context.Rip == fault_pc );
+        for (i = 0; i < 16; i++) assert( (&context.Rax)[i] == expected[i] );
+        assert( (context.EFlags & 0x8d5) == 0x44 );
+        assert( context.FltSave.XmmRegisters[8].Low == 8 );
+        assert( context.FltSave.XmmRegisters[8].High == 10 );
+        assert( fixture->exception.ExceptionCode == (DWORD)STATUS_ACCESS_VIOLATION );
+        assert( fixture->exception.ExceptionAddress == (void *)fault_pc );
+        assert( !fixture->exception.ExceptionFlags && fixture->exception.NumberParameters == 2 );
+        assert( fixture->exception.ExceptionInformation[0] == access );
+        assert( fixture->exception.ExceptionInformation[1] == fault_address );
+        assert( !mprotect( (void *)fault_address, 0x1000, PROT_READ | PROT_WRITE ) );
+        assert( run( fixture, &context, 0 ) == STATUS_SUCCESS );
+        assert( context.Rip == NATIVE && !fixture->exception.ExceptionCode );
+    }
+    init_context( &context, BASE + SIZE + 0x100 );
+    assert( run( fixture, &context, 0 ) == STATUS_ACCESS_VIOLATION );
+    assert( fixture->exception.ExceptionInformation[0] == 8 );
+    assert( fixture->exception.ExceptionInformation[1] == context.Rip );
+}
+
+static void test_partial_fault_context( struct fixture *fixture )
+{
+    const ULONG_PTR fault_address = BASE + SIZE - 0x1000;
+    static const unsigned char pop[] = {0x41, 0x8f, 0x00}; /* pop qword [r8] */
+    static const unsigned char movs[] = {0xf3, 0x48, 0xa5}; /* rep movsq */
+    const ULONGLONG value = UINT64_C(0x123456789abcdef0);
+    AMD64_CONTEXT context;
+
+    memcpy( fixture->memory + STACK - BASE, &value, sizeof(value) );
+    assert( !mprotect( (void *)fault_address, 0x1000, PROT_NONE ) );
+    put_code( fixture, 0x2300, pop, sizeof(pop) );
+    init_context( &context, BASE + 0x2300 );
+    context.R8 = fault_address;
+    assert( run( fixture, &context, 0 ) == STATUS_ACCESS_VIOLATION );
+    assert( context.Rsp == STACK && context.Rip == BASE + 0x2300 );
+    assert( fixture->exception.ExceptionInformation[0] == 1 );
+    put_code( fixture, 0x2400, movs, sizeof(movs) );
+    init_context( &context, BASE + 0x2400 );
+    context.Rsi = STACK; context.Rdi = fault_address; context.Rcx = 1;
+    assert( run( fixture, &context, 0 ) == STATUS_ACCESS_VIOLATION );
+    assert( context.Rsi == STACK && context.Rdi == fault_address && context.Rcx == 1 );
+    assert( context.Rip == BASE + 0x2400 );
+    assert( !mprotect( (void *)fault_address, 0x1000, PROT_READ | PROT_WRITE ) );
 }
 
 #ifdef WINE_NX_BOX64_DYNAREC
@@ -531,6 +623,11 @@ static void test_native_return_sites( struct fixture *fixture )
 int main(void)
 {
     struct fixture fixture = {0};
+    struct sigaction action = {.sa_sigaction = operand_fault_handler, .sa_flags = SA_SIGINFO};
+
+    sigemptyset( &action.sa_mask );
+    assert( !sigaction( SIGSEGV, &action, NULL ) );
+    assert( !sigaction( SIGBUS, &action, NULL ) );
 
     fixture.memory = mmap( (void *)(uintptr_t)BASE, SIZE, PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0 );
@@ -548,6 +645,8 @@ int main(void)
     test_x87_context( &fixture );
     test_mmx_context( &fixture );
     test_unsupported( &fixture );
+    test_fault_context( &fixture );
+    test_partial_fault_context( &fixture );
 #ifdef WINE_NX_BOX64_DYNAREC
     test_high_invalidation( &fixture );
     test_native_return_sites( &fixture );

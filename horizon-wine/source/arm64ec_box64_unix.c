@@ -176,7 +176,7 @@ static NTSTATUS run_guest( void *args )
         context->FltSave.MxCsr = context->MxCsr;
     }
     status = wine_nx_box64_run_amd64( context, (ULONG_PTR)thread->teb, &thread->state,
-                                     &host, thread, 0, 1000000, &p->executed );
+                                     &host, thread, 0, 1000000, &p->executed, &thread->exception );
 #ifdef __SWITCH__
     if (status == STATUS_TIMEOUT && thread->area->SuspendDoorbell &&
         __atomic_load_n( thread->area->SuspendDoorbell, __ATOMIC_ACQUIRE ))
@@ -205,10 +205,13 @@ static NTSTATUS run_guest( void *args )
         p->target = context->Rip;
         return STATUS_SUCCESS;
     }
-    memset( &thread->exception, 0, sizeof(thread->exception) );
-    thread->exception.ExceptionCode = status;
-    thread->exception.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
-    thread->exception.ExceptionAddress = (void *)(ULONG_PTR)context->Rip;
+    if (!thread->exception.ExceptionCode)
+    {
+        memset( &thread->exception, 0, sizeof(thread->exception) );
+        thread->exception.ExceptionCode = status;
+        thread->exception.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
+        thread->exception.ExceptionAddress = (void *)(ULONG_PTR)context->Rip;
+    }
     p->exception_record = (ULONG_PTR)&thread->exception;
     p->exit_kind = WINEBOX64EC_EXIT_EXCEPTION;
     return STATUS_SUCCESS;

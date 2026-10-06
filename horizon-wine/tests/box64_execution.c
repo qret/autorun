@@ -24,6 +24,9 @@
 #include <unistd.h>
 #endif
 #include "wow64_box64_engine.h"
+#ifndef __SWITCH__
+#include "box64_fault_context.h"
+#endif
 #ifdef __SWITCH__
 #undef far /* Wine poisons this identifier; libnx uses it for the fault register. */
 u32 __nx_exception_ignoredebug = 1;
@@ -55,14 +58,17 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
     unsigned int exception_class = ctx->esr >> 26;
     if ((exception_class == 0x24 || exception_class == 0x25) && !(ctx->esr & (1u << 10)))
     {
-        unsigned long long x[31];
+        ARM64_NT_CONTEXT context = {0};
         unsigned int i;
 
-        for (i = 0; i < 29; i++) x[i] = ctx->cpu_gprs[i].x;
-        x[29] = ctx->fp.x;
-        x[30] = ctx->lr.x;
+        for (i = 0; i < 29; i++) context.X[i] = ctx->cpu_gprs[i].x;
+        context.Fp = ctx->fp.x;
+        context.Lr = ctx->lr.x;
+        context.Pc = ctx->pc.x;
+        context.Cpsr = ctx->pstate;
+        memcpy( context.V, ctx->fpu_gprs, sizeof(context.V) );
         ++native_faults;
-        wine_nx_box64_handle_fault( ctx->far.x, (ctx->esr >> 6) & 1, ctx->pc.x, x );
+        wine_nx_box64_handle_fault( ctx->far.x, (ctx->esr >> 6) & 1, &context );
     }
     printf( "Unexpected native exception esr=%#x pc=%#llx far=%#llx\n", ctx->esr,
             (unsigned long long)ctx->pc.x, (unsigned long long)ctx->far.x );
@@ -102,13 +108,12 @@ static int protect_fault_page( BOOL accessible )
 static void operand_fault_handler( int signal, siginfo_t *info, void *context )
 {
     ucontext_t *uc = context;
-    unsigned long long x[31];
-    unsigned int i;
+    ARM64_NT_CONTEXT native;
 
-    for (i = 0; i < 31; i++) x[i] = uc->uc_mcontext.regs[i];
+    capture_fault_context( uc, &native );
     ++native_faults;
     /* The access kind is Horizon's to read from ESR; the host passes a read. */
-    wine_nx_box64_handle_fault( (ULONG_PTR)info->si_addr, 0, uc->uc_mcontext.pc, x );
+    wine_nx_box64_handle_fault( (ULONG_PTR)info->si_addr, 0, &native );
     _Exit( 128 + signal ); /* Never consume a fault outside an active guest run. */
 }
 
@@ -852,7 +857,7 @@ int main(void)
             {0xf0,0x01,0x05,0,0xf0,0x01,0x10},  /* lock add [protected], eax */
         };
         unsigned int i;
-        assert( !wine_nx_box64_handle_fault( BASE + SIZE - 0x1000, 0, 0, NULL ) );
+        assert( !wine_nx_box64_handle_fault( BASE + SIZE - 0x1000, 0, NULL ) );
         for (i = 0; i < sizeof(fault_programs) / sizeof(fault_programs[0]); ++i)
         {
             put_code( memory, 0x200, fault_programs[i], sizeof(fault_programs[i]) );

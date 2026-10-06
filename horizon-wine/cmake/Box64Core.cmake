@@ -283,16 +283,31 @@ function(wine_nx_add_box64_core target)
     wine_nx_box64_write("${window_dir}/dynarec/arm64/dynarec_arm64_functions.c"
         "${WINE_NX_BOX64_WINDOW_HOST}${arm64_functions_source}")
     list(APPEND arm64_sources "${window_dir}/dynarec/arm64/dynarec_arm64_functions.c")
-    if(CMAKE_SYSTEM_NAME STREQUAL "Generic")
-        # Linux signal-frame reconstruction is not a Horizon implementation.
-        list(REMOVE_ITEM arm64_sources "${root}/src/dynarec/arm64/dynarec_arm64_arch.c")
-        file(READ "${root}/src/dynarec/arm64/dynarec_arm64_arch.c" arch_source)
-        wine_nx_box64_patch(arch_source "#ifndef _WIN32 // TODO: Implemented this for Win32"
-            "#if 0 /* Horizon uses its own exception boundary. */" "Horizon excludes Linux adjust_arch")
-        set(arch_generated "${CMAKE_CURRENT_BINARY_DIR}/${target}-arch.c")
-        file(WRITE "${arch_generated}" "${arch_source}")
-        list(APPEND arm64_sources "${arch_generated}")
-    endif()
+    # Reuse Box64's register-cache metadata without a Linux signal frame.
+    list(REMOVE_ITEM arm64_sources "${root}/src/dynarec/arm64/dynarec_arm64_arch.c")
+    file(READ "${root}/src/dynarec/arm64/dynarec_arm64_arch.c" arch_source)
+    wine_nx_box64_patch(arch_source
+        "void adjust_arch(dynablock_t* db, x64emu_t* emu, ucontext_t* p, uintptr_t x64pc)"
+        "void wine_nx_box64_adjust_arch(dynablock_t* db, x64emu_t* emu, uint32_t pstate, const __uint128_t* vregs, uintptr_t x64pc)"
+        "recover register caches from a native exception context")
+    wine_nx_box64_patch(arch_source [=[    struct fpsimd_context *fpsimd = NULL;
+    // find fpsimd struct
+    {
+        struct _aarch64_ctx * ff = (struct _aarch64_ctx*)p->uc_mcontext.__reserved;
+        while (ff->magic && !fpsimd) {
+            if(ff->magic==FPSIMD_MAGIC)
+                fpsimd = (struct fpsimd_context*)ff;
+            else
+                ff = (struct _aarch64_ctx*)((uintptr_t)ff + ff->size);
+        }
+    }
+]=] "" "use the supplied SIMD registers")
+    string(REPLACE "p->uc_mcontext.pstate" "pstate" arch_source "${arch_source}")
+    string(REPLACE "fpsimd->vregs" "vregs" arch_source "${arch_source}")
+    string(REPLACE "fpsimd" "vregs" arch_source "${arch_source}")
+    set(arch_generated "${CMAKE_CURRENT_BINARY_DIR}/${target}-arch.c")
+    file(WRITE "${arch_generated}" "${arch_source}")
+    list(APPEND arm64_sources "${arch_generated}")
     set(asm_sources arm64_prolog.S arm64_epilog.S arm64_next.S arm64_lock.S)
     list(TRANSFORM asm_sources PREPEND "${root}/src/dynarec/arm64/")
     set(pass_sources dynarec_arm64_helper.c dynarec_arm64_emit_tests.c

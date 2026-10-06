@@ -19,6 +19,7 @@ struct wine_nx_amd64_state
 NTSTATUS wine_nx_box64_run_amd64( AMD64_CONTEXT *context, ULONG_PTR gs_base,
                                  struct wine_nx_amd64_state *state,
                                  const struct wine_nx_amd64_host *host, void *opaque,
-                                 ULONG_PTR completion, ULONGLONG budget, ULONGLONG *executed );
+                                 ULONG_PTR completion, ULONGLONG budget, ULONGLONG *executed,
+                                 EXCEPTION_RECORD *exception );
 
 #endif

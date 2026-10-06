@@ -40,6 +40,7 @@
 #endif
 
 #include "box64_code_arena.h"
+#include "wow64_box64_engine.h"
 #ifdef __SWITCH__
 #include "horizon_code_memory.h"
 #endif
@@ -1078,6 +1079,26 @@ int wine_nx_box64_pc_to_x86( uintptr_t pc, uintptr_t *x86 )
     if (!arena || !(db = block_at( arena, offset ))) return 0;
     /* The block's code pointers are executable-alias addresses, and so is pc. */
     *x86 = db->done ? getX64Address( db, (uintptr_t)arena->rx + offset ) : (uintptr_t)db->x64_addr;
+    return 1;
+}
+
+int wine_nx_box64_recover_state( x64emu_t *emu, const ARM64_NT_CONTEXT *context )
+{
+    extern void wine_nx_box64_adjust_arch( dynablock_t *db, x64emu_t *emu, uint32_t pstate,
+                                          const __uint128_t *vregs, uintptr_t x64pc );
+    size_t offset;
+    struct nx_arena *arena = find_arena( (void *)(uintptr_t)context->Pc, &offset );
+    dynablock_t *db;
+    unsigned int i, count = emu->segs[_CS] == 0x23 ? 8 : 16;
+
+    if (!arena || !(db = block_at( arena, offset )) || !db->done ||
+        context->Pc < (uintptr_t)db->block || context->Pc - (uintptr_t)db->block >= (size_t)db->size)
+        return 0;
+    for (i = 0; i < count; i++) emu->regs[i].q[0] = context->X[10 + i];
+    emu->eflags.x64 = context->X[26];
+    emu->ip.q[0] = getX64Address( db, context->Pc );
+    wine_nx_box64_adjust_arch( db, emu, context->Cpsr, (const __uint128_t *)context->V, emu->ip.q[0] );
+    emu->df = d_none;
     return 1;
 }
 
