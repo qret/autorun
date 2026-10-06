@@ -6051,6 +6051,28 @@ ssize_t virtual_locked_read( int fd, void *addr, size_t size )
     return ret;
 }
 
+#ifdef __SWITCH__
+ssize_t virtual_locked_pipe_read( int fd, void *addr, size_t size, unsigned int *status )
+{
+    sigset_t sigset;
+    BOOL has_write_watch = FALSE;
+    ssize_t ret;
+    int err = EFAULT;
+
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    if (!check_write_access( addr, size, &has_write_watch ))
+    {
+        ret = horizon_read_pipe( fd, addr, size, status );
+        err = errno;
+        if (has_write_watch) update_write_watches( addr, size, max( 0, ret ));
+    }
+    else ret = -1;
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    errno = err;
+    return ret;
+}
+#endif
+
 
 /***********************************************************************
  *           virtual_locked_pread

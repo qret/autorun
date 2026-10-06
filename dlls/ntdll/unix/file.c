@@ -5995,7 +5995,21 @@ static BOOL async_read_proc( void *user, ULONG_PTR *info, unsigned int *status )
                                           &needs_close, NULL, NULL )))
             break;
 
-        result = virtual_locked_read(fd, &fileio->buffer[fileio->already], fileio->count-fileio->already);
+#ifdef __SWITCH__
+        if (horizon_is_byte_pipe( fd ))
+        {
+            result = virtual_locked_pipe_read( fd, &fileio->buffer[fileio->already],
+                                               fileio->count - fileio->already, status );
+            if (result >= 0)
+            {
+                fileio->already += result;
+                if (needs_close) close( fd );
+                break;
+            }
+        }
+        else
+#endif
+            result = virtual_locked_read(fd, &fileio->buffer[fileio->already], fileio->count-fileio->already);
         if (needs_close) close( fd );
 
         if (result < 0)
@@ -6572,7 +6586,20 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
 
     for (;;)
     {
-        if ((result = virtual_locked_read( unix_handle, (char *)buffer + total, length - total )) >= 0)
+#ifdef __SWITCH__
+        if (type == FD_TYPE_CHAR && horizon_is_byte_pipe( unix_handle ))
+        {
+            result = virtual_locked_pipe_read( unix_handle, (char *)buffer + total, length - total, &status );
+            if (result >= 0)
+            {
+                total += result;
+                goto done;
+            }
+        }
+        else
+#endif
+            result = virtual_locked_read( unix_handle, (char *)buffer + total, length - total );
+        if (result >= 0)
         {
             total += result;
             if (!result || total == length)
@@ -6640,7 +6667,11 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
             pfd.fd = unix_handle;
             pfd.events = POLLIN;
 
+#ifdef __SWITCH__
+            if (!timeout || !(ret = horizon_poll_one( &pfd, timeout )))
+#else
             if (!timeout || !(ret = poll( &pfd, 1, timeout )))
+#endif
             {
                 if (total)  /* return with what we got so far */
                     status = STATUS_SUCCESS;
@@ -6662,7 +6693,11 @@ done:
 
 err:
     if (needs_close) close( unix_handle );
-    if (status == STATUS_SUCCESS || (status == STATUS_END_OF_FILE && (!async_read || type == FD_TYPE_FILE)))
+    if (status == STATUS_SUCCESS ||
+#ifdef __SWITCH__
+        status == STATUS_BUFFER_OVERFLOW ||
+#endif
+        (status == STATUS_END_OF_FILE && (!async_read || type == FD_TYPE_FILE)))
     {
         set_sync_iosb( io, status, total, options );
 #ifdef __SWITCH__
@@ -6691,7 +6726,11 @@ err:
 #endif
         TRACE("= SUCCESS (%u)\n", total);
         if (event) NtSetEvent( event, NULL );
-        if (apc && (!status || async_read)) NtQueueApcThread( GetCurrentThread(), (PNTAPCFUNC)apc,
+        if (apc && (!status || async_read
+#ifdef __SWITCH__
+                    || status == STATUS_BUFFER_OVERFLOW
+#endif
+                   )) NtQueueApcThread( GetCurrentThread(), (PNTAPCFUNC)apc,
                                                               (ULONG_PTR)apc_user, iosb_ptr, 0 );
     }
     else
@@ -6973,7 +7012,13 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
             pfd.fd = unix_handle;
             pfd.events = POLLOUT;
 
+#ifdef __SWITCH__
+            if (!timeout || !(ret = horizon_is_byte_pipe( unix_handle ) ?
+                horizon_poll_pipe_write( unix_handle, length - total, timeout ) :
+                horizon_poll_one( &pfd, timeout )))
+#else
             if (!timeout || !(ret = poll( &pfd, 1, timeout )))
+#endif
             {
                 /* return with what we got so far */
                 status = total ? STATUS_SUCCESS : STATUS_TIMEOUT;

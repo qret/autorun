@@ -14,6 +14,12 @@
 
 #ifdef __SWITCH__
 #include <stddef.h>
+#include <sys/types.h>
+struct pollfd;
+extern int horizon_poll_one( struct pollfd *fd, int timeout );
+extern int horizon_poll_pipe_write( int fd, size_t size, int timeout );
+extern int horizon_is_byte_pipe( int fd );
+extern ssize_t horizon_read_pipe( int fd, void *data, size_t size, unsigned int *status );
 
 extern unsigned int horizon_set_process_machine( unsigned short machine );
 extern ULONG_PTR horizon_get_system_affinity_mask(void);

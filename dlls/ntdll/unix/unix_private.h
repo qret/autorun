@@ -337,6 +337,9 @@ extern void virtual_init_user_shared_data(void);
 extern NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec, void *stack );
 extern unsigned int virtual_locked_server_call( void *req_ptr );
 extern ssize_t virtual_locked_read( int fd, void *addr, size_t size );
+#ifdef __SWITCH__
+extern ssize_t virtual_locked_pipe_read( int fd, void *addr, size_t size, unsigned int *status );
+#endif
 extern ssize_t virtual_locked_pread( int fd, void *addr, size_t size, off_t offset );
 extern ssize_t virtual_locked_recvmsg( int fd, struct msghdr *hdr, int flags );
 extern BOOL virtual_is_valid_code_address( const void *addr, SIZE_T size );

@@ -105,8 +105,10 @@ fixture = r'''
 
 @HEADER@
 @SOCKADDR@
+@BYTEPIPE@
 
-enum { HORIZON_SERVER_OBJECT_EVENT = 1, HORIZON_SERVER_OBJECT_COMPLETION, HORIZON_SERVER_OBJECT_SOCK };
+enum { HORIZON_SERVER_OBJECT_EVENT = 1, HORIZON_SERVER_OBJECT_COMPLETION, HORIZON_SERVER_OBJECT_SOCK,
+       HORIZON_SERVER_OBJECT_NAMED_PIPE };
 enum { HORIZON_SELECT_NONE, HORIZON_SELECT_WAIT, HORIZON_SELECT_WAIT_ALL, HORIZON_SELECT_SIGNAL_AND_WAIT };
 
 struct horizon_server_request_header { int req; unsigned int request_size; unsigned int reply_size; };
@@ -207,6 +209,8 @@ static unsigned int horizon_server_find_io_object_locked( unsigned int handle, s
     return horizon_server_find_sock_locked( handle, object );
 }
 
+static struct horizon_byte_pipe_end *horizon_byte_pipe_from_fd( int fd ) { (void)fd; return NULL; }
+static int horizon_poll_one( struct pollfd *fd, int timeout ) { return poll( fd, 1, timeout ); }
 
 static void horizon_server_post_completion_locked( struct horizon_server_object *port, unsigned long long ckey,
                                                    unsigned long long cvalue, unsigned int status,
@@ -790,6 +794,7 @@ int main( void )
 fixture = (fixture.replace('@DEFINES@', defines)
                   .replace('@HEADER@', header)
                   .replace('@SOCKADDR@', sockaddr_header)
+                  .replace('@BYTEPIPE@', (root / 'dlls/ntdll/unix/horizon_byte_pipe.h').read_text())
                   .replace('@SELECT@', struct('horizon_select_request') + '\n' + struct('horizon_select_signal_and_wait_op'))
                   .replace('@SOCKET_REQUESTS@', '\n'.join(struct(name) for name in (
                       'horizon_server_reply_header', 'horizon_recv_socket_request', 'horizon_send_socket_request',
