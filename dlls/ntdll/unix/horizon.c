@@ -14190,11 +14190,21 @@ void horizon_get_address_space_limits( void **start, void **limit )
     rc_size = svcGetInfo( &size, InfoType_AslrRegionSize, CUR_PROCESS_HANDLE, 0 );
     if (R_SUCCEEDED(rc_base) && R_SUCCEEDED(rc_size) && size && base + size > base)
     {
+        /* Said once: every reservation asks, and on a 32-bit address space the
+         * guest's reservations are split into tens of thousands of pieces, each
+         * of which wrote this line to the card under verbose traces. */
+        static u64 traced_base, traced_size;
+
         *start = (void *)base;
         *limit = (void *)(base + size);
-        horizon_trace( "[VA] Horizon ASLR region base=0x%llx size=0x%llx limit=0x%llx",
-                       (unsigned long long)base, (unsigned long long)size,
-                       (unsigned long long)(base + size) );
+        if (base != traced_base || size != traced_size)
+        {
+            traced_base = base;
+            traced_size = size;
+            horizon_trace( "[VA] Horizon ASLR region base=0x%llx size=0x%llx limit=0x%llx",
+                           (unsigned long long)base, (unsigned long long)size,
+                           (unsigned long long)(base + size) );
+        }
         return;
     }
 

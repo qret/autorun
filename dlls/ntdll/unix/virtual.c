@@ -252,6 +252,18 @@ static void *working_set_limit   = (void *)0x7fff0000;
 
 static void *host_addr_space_limit;  /* top of the host virtual address space */
 
+/* Where memory only native code uses goes, thread data and the TEBs of 64-bit
+ * programs: above 4 GB, out of a 32-bit program's way, when the host address
+ * space reaches that far. Autorun 32-bit's ends at 4 GB, and there anywhere
+ * will do; asking above it there only fails. */
+static inline ULONG_PTR native_limit_low(void)
+{
+#ifdef __SWITCH__
+    if ((ULONG_PTR)host_addr_space_limit <= limit_4g) return 0;
+#endif
+    return limit_4g;
+}
+
 static struct file_view *arm64ec_view;
 
 ULONG_PTR user_space_wow_limit = 0;
@@ -5020,6 +5032,25 @@ struct thread_data *virtual_alloc_first_thread_data(void)
                        VPROT_WRITE |
 #endif
                        VPROT_READ | VPROT_COMMITTED, 0, 0, 0 );
+#ifdef __SWITCH__
+    if (status)
+    {
+        /* Horizon scatters the heap and alias regions through the address
+         * space at every launch and refuses mappings inside them, so the
+         * Windows address of this page is available or not by luck - on the
+         * 32-bit profile that a fixed low image base needs, it is often not.
+         * Wine reaches the page through this pointer, the x86 ntdll through
+         * wine_nx_user_shared_data, and a read of the ABI address is served
+         * from here (horizon_read_redirect.h); that beats refusing to start.
+         * Below 4 GB, where that 32-bit pointer can name it, and from the top,
+         * out of the program's way. */
+        ERR( "the shared user data address %p is unavailable, status %08x; moving it\n",
+             user_shared_data, status );
+        status = map_view( &view, NULL, page_size, MEM_TOP_DOWN,
+                           VPROT_WRITE | VPROT_READ | VPROT_COMMITTED, 0, limit_4g - 1, 0 );
+        if (!status) user_shared_data = view->base;
+    }
+#endif
     if (status)
     {
         ERR( "wine: failed to map the shared user data: %08x\n", status );
@@ -5027,7 +5058,7 @@ struct thread_data *virtual_alloc_first_thread_data(void)
     }
 
     status = map_view( &view, NULL, size, MEM_TOP_DOWN,
-                       VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_4g, 0, 0 );
+                       VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, native_limit_low(), 0, 0 );
     if (status)
     {
         ERR( "wine: failed to allocate initial thread data: %08x\n", status );
@@ -5060,7 +5091,7 @@ void virtual_alloc_first_teb(void)
     teb_block_size += page_size;  /* for debug info */
 
     if (user_space_wow_limit) limit_high = user_space_wow_limit & ~granularity_mask;
-    else if (use_aslr()) limit_low = limit_4g;
+    else if (use_aslr()) limit_low = native_limit_low();
 
     status = map_view( &view, NULL, 16 * teb_block_size, 0,
                        VPROT_READ | VPROT_WRITE, limit_low, limit_high, 0 );
@@ -5123,7 +5154,7 @@ NTSTATUS virtual_alloc_teb( struct thread_data *data )
             ULONG_PTR limit_low = 0, limit_high = 0;
 
             if (user_space_wow_limit) limit_high = user_space_wow_limit & ~granularity_mask;
-            else if (use_aslr()) limit_low = limit_4g;
+            else if (use_aslr()) limit_low = native_limit_low();
 
             if ((status = map_view( &view, NULL, 32 * teb_block_size, 0,
                                     VPROT_READ | VPROT_WRITE, limit_low, limit_high, 0 )))
@@ -5177,7 +5208,10 @@ struct thread_data *virtual_alloc_thread_data(void)
 #endif
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
-    status = map_view( &view, NULL, size, 0, VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_4g, 0, 0 );
+    /* From the top where it cannot go above 4 GB, as far from the guest as it
+     * goes, as virtual_alloc_thread_stack does. */
+    status = map_view( &view, NULL, size, native_limit_low() ? 0 : MEM_TOP_DOWN,
+                       VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, native_limit_low(), 0, 0 );
     if (!status)
     {
 #if defined(__SWITCH__) && defined(WINE_NX_SWAP_POC)
