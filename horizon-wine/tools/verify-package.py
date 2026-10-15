@@ -10,6 +10,7 @@ first and then there, which is how the two meet on a card."""
 from pathlib import Path
 import argparse
 import json
+import os
 import re
 import subprocess
 
@@ -19,7 +20,10 @@ parser.add_argument("stage", type=Path)
 parser.add_argument("--dlls", type=Path, default=root / "horizon-dlls/switch/wine")
 args = parser.parse_args()
 stage, dlls = args.stage.resolve(), args.dlls.resolve()
-readobj = root / "horizon-wine/toolchains/llvm-mingw-20260505-ucrt-macos-universal/bin/llvm-readobj"
+# The llvm-mingw build.sh fetched for this host, which it names in the
+# environment; the macOS one when run on its own.
+readobj = (Path(os.environ["WINE_NX_LLVM_MINGW"]) if os.environ.get("WINE_NX_LLVM_MINGW")
+           else root / "horizon-wine/toolchains/llvm-mingw-20260505-ucrt-macos-universal") / "bin/llvm-readobj"
 
 def inspect(path, option):
     return subprocess.check_output([str(readobj), option, str(path)], text=True)
