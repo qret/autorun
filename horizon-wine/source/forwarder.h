@@ -1,7 +1,10 @@
 /*
  * Making a forwarder: an application the console installs and lists on the home
  * menu, whose only job is to start the homebrew loader with Autorun's NRO, in
- * a 39-bit address space. Fixed-low Win32 images require the low-window patch.
+ * the address space the forwarder's own NPDM asks for: 39 bits, or 32 bits for
+ * Win32 images linked for a fixed low address on an Atmosphere without the
+ * low-window patch. The 32-bit spaces begin at 0x200000 rather than 0x8000000,
+ * which is what lets such an image map; they cap the whole space at 4 GiB.
  *
  * The pieces are sphaira's (src/owo.cpp, ISC, TotalJustice), as is the loader
  * the program NCA carries (hbl/, nx-hbloader).
@@ -20,9 +23,16 @@ struct wine_nx_forwarder
     const unsigned char *icon;  /* a 256x256 JPEG */
     size_t icon_size;
     unsigned int game_id;
+    /* 1 for the 32-bit address space without the alias region (NPDM type 2),
+     * 0 for the 39-bit one. Not for game forwarders. */
+    int address_space_32bit;
 };
 
+/* The application id a forwarder for this NRO and these arguments has: 39-bit,
+ * or with the address space given. It comes from them alone, so the same
+ * request always names the same entry -- and two spaces are two entries. */
 unsigned long long wine_nx_forwarder_title_id( const char *nro_path, const char *args );
+unsigned long long wine_nx_forwarder_title_id_space( const char *nro_path, const char *args, int address_space_32bit );
 unsigned long long wine_nx_forwarder_game_title_id( unsigned int game_id );
 
 /* Where the installer says what the console made of what it wrote. */
@@ -43,6 +53,8 @@ extern const unsigned char wine_nx_hbl_npdm[];
 extern const size_t wine_nx_hbl_npdm_size;
 extern const unsigned char wine_nx_icon_any[];
 extern const size_t wine_nx_icon_any_size;
+extern const unsigned char wine_nx_icon_32bit[];
+extern const size_t wine_nx_icon_32bit_size;
 /* The mark the launcher shows in the corner of its own screens. */
 extern const unsigned char wine_nx_logo[];
 extern const size_t wine_nx_logo_size;

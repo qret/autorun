@@ -127,6 +127,13 @@ static u64 calculateMaxHeapSize(void) {
     if (size > 0x6000000)
         size -= 0x6000000;
 
+    // A 32-bit address space has a 2 GiB heap region, less than the memory
+    // an application is given, and the kernel refuses a heap larger than it.
+    u64 region = 0;
+    if (R_SUCCEEDED(svcGetInfo(&region, InfoType_HeapRegionSize, CUR_PROCESS_HANDLE, 0)) &&
+        region && size > region)
+        size = region & ~0x1FFFFFull;
+
     return size;
 }
 

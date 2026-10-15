@@ -1810,25 +1810,30 @@ static int confirm_forwarder( struct launcher *l )
     return ui_confirm( ui, "Install forwarder", message, "Install" );
 }
 
-static void make_forwarder( struct launcher *l )
+/* Build the 39- or 32-bit forwarder after the warning, and say how it went.
+ * Returns 1 once it is installed. */
+static int install_forwarder( struct launcher *l, int bits )
 {
     struct ui *ui = &l->ui;
+    unsigned int (*install)( const char ** ) = bits == 32 ? l->options->install_forwarder_32bit
+                                                          : l->options->install_forwarder;
+    const char *name = bits == 32 ? "Autorun 32-bit" : "Autorun";
     const char *step = NULL;
     char message[256];
     unsigned int rc;
 
-    if (!l->options->install_forwarder) return;
-    if (!confirm_forwarder( l )) { ui_start_screen( ui ); return; }
+    if (!install) return 0;
+    if (!confirm_forwarder( l )) { ui_start_screen( ui ); return 0; }
 
     /* One frame saying what is happening: building the three parts and writing
      * them takes a moment, and nothing is drawn while it does. */
     ui_start_screen( ui );
     ui_background( ui );
-    ui_header_back( ui, "Install forwarder", "Autorun" );
+    ui_header_back( ui, "Install forwarder", name );
     ui_text_centered( ui, ui->large, ui->width / 2, ui->height / 2 - 30, "Installing...", ui->value );
     ui_present( ui );
 
-    rc = l->options->install_forwarder( &step );
+    rc = install( &step );
     ui_start_screen( ui );
     if (rc)
     {
@@ -1836,9 +1841,17 @@ static void make_forwarder( struct launcher *l )
                   step ? step : "working", rc );
         ui_message( ui, "Could not install", message );
         ui_start_screen( ui );
-        return;
+        return 0;
     }
-    ui_message( ui, "Installed", "Autorun is on the home menu." );
+    return 1;
+}
+
+static void make_forwarder( struct launcher *l, int bits )
+{
+    struct ui *ui = &l->ui;
+
+    if (!install_forwarder( l, bits )) return;
+    ui_message( ui, "Installed", bits == 32 ? "Autorun 32-bit is on the home menu." : "Autorun is on the home menu." );
     ui_start_screen( ui );
 }
 
@@ -1975,10 +1988,77 @@ static int next_state( int state, int direction )
     return order[(i + (direction < 0 ? 2 : 1)) % 3];
 }
 
+/* Whether this process can run it at all. Nothing here can widen or narrow the
+ * address space: Horizon fixed it when the forwarder started this process. A
+ * 32-bit space begins low enough for any fixed image base. */
 static int address_space_fits( struct launcher *l, struct program *p )
 {
+    if (l->options->address_space_bits == 32) return 1;
     return l->options->address_space_bits == 39 &&
            (l->options->low_window || launcher_program_address_space( p->path ) != LAUNCHER_ADDRESS_LOW);
+}
+
+/* The forwarder the game should start from instead of this one, or 0 to start
+ * it here. A fixed-address game in a 39-bit process without the low window
+ * goes to the 32-bit forwarder: that is how it runs on an Atmosphere nobody
+ * patched. Any other game in a 32-bit process goes back to the 39-bit one,
+ * when the console has it, because there it shares the low 4 GB with nothing. */
+static unsigned long long forwarder_for( struct launcher *l, struct program *p )
+{
+    const struct wine_nx_launcher_options *o = l->options;
+    int low = launcher_program_address_space( p->path ) == LAUNCHER_ADDRESS_LOW;
+
+    if (!o->launch_title || !o->title_installed) return 0;
+    if (o->address_space_bits == 39 && !o->low_window && low && o->forwarder_32bit_id) return o->forwarder_32bit_id;
+    if (o->address_space_bits == 32 && !low && o->main_forwarder_id && o->title_installed( o->main_forwarder_id ))
+        return o->main_forwarder_id;
+    return 0;
+}
+
+/* Leave the game in run-next.txt and ask the console for the other forwarder,
+ * which starts it by itself. The 32-bit one is offered first when it is not
+ * installed. Returns 0: whatever happens, nothing more starts here. */
+static int hand_over( struct launcher *l, struct program *p, unsigned long long id )
+{
+    struct ui *ui = &l->ui;
+    int to_32bit = id == l->options->forwarder_32bit_id;
+    const char *name = to_32bit ? "Autorun 32-bit" : "Autorun";
+    char path[512], message[512];
+
+    if (to_32bit && !l->options->title_installed( id ))
+    {
+        snprintf( message, sizeof(message),
+                  "%s is linked for a fixed address in the low 4 GB. Without the Atmosphere low-address patch "
+                  "it starts from a second HOME menu entry, Autorun 32-bit, which gives it that memory. "
+                  "Nothing in the firmware or the boot files is changed.\n\nInstall Autorun 32-bit now?",
+                  p->title );
+        if (!l->options->install_forwarder_32bit ||
+            !ui_confirm( ui, "Autorun 32-bit needed", message, "Continue" ))
+        {
+            ui_start_screen( ui );
+            return 0;
+        }
+        if (!install_forwarder( l, 32 )) return 0;
+    }
+    /* The game goes on the card before the forwarder is asked for, because
+     * once the console takes the request nothing here runs again. */
+    runtime_file( l, "run-next.txt", path, sizeof(path) );
+    if (!write_line( path, p->path ))
+    {
+        ui_toast( ui, "Could not write run-next.txt", 2500 );
+        return 0;
+    }
+    if (!l->options->launch_title( id ))
+    {
+        remove( path );
+        snprintf( message, sizeof(message), "The console refused to open %s.", name );
+        ui_message( ui, "Could not open it", message );
+        ui_start_screen( ui );
+        return 0;
+    }
+    snprintf( message, sizeof(message), "Opening %s...", name );
+    ui_toast( ui, message, 4000 );
+    return 0;
 }
 
 static int prepare_program_graphics( struct launcher *l, struct program *p )
@@ -1999,6 +2079,7 @@ static int prepare_program_graphics( struct launcher *l, struct program *p )
 static int start_program( struct launcher *l, struct program *p, char *target, size_t size )
 {
     struct ui *ui = &l->ui;
+    unsigned long long forwarder;
     char path[512];
 
     if (!file_exists( p->path ) || l->options->machine_of( p->path, &p->machine ))
@@ -2007,11 +2088,13 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
         ui_message( ui, "Game unavailable", "The executable is missing or is not supported by this build." );
         return 0;
     }
-    if (!address_space_fits( l, p ))
+    forwarder = forwarder_for( l, p );
+    if (!forwarder && !address_space_fits( l, p ))
     {
         ui_message( ui, "Address space unavailable", l->options->address_space_bits != 39
                     ? "Start Autorun from its 39-bit forwarder. You can install it in Settings > System."
-                    : "This game requires the Atmosphere low-address patch. Restart with the patched loader and Mesosphere." );
+                    : "This game needs the low 4 GB. Install Autorun 32-bit in Settings > System, "
+                      "or use the Atmosphere low-address patch." );
         return 0;
     }
     /* Autorun ships no Windows DLLs: a card without them is offered them here. */
@@ -2020,6 +2103,8 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
     p->missing = 0;
     p->launched_order = l->catalog.next_order++;
     save_library( l );
+    /* What the game needs is ready on the card; the other forwarder starts it. */
+    if (forwarder) return hand_over( l, p, forwarder );
 
     ui_background( ui );
     ui_text_centered( ui, ui->large, ui->width / 2, (ui->height - TTF_FontHeight( ui->large )) / 2,
@@ -2996,7 +3081,7 @@ enum settings_row
 {
     SET_HIDDEN, SET_HIDE_MISSING, SET_DXVK_ON_ADD, SET_VERBOSE, SET_PROFILE, SET_WINDOWS,
     SET_INPUT, SET_INPUT_END = SET_INPUT + INPUT_ROW_COUNT - 1, SET_STEAMGRIDDB, SET_DOWNLOAD_COVERS,
-    SET_DLLS, SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN,
+    SET_DLLS, SET_UPDATE, SET_SETUP, SET_REOPEN, SET_MAKE_MAIN, SET_MAKE_32BIT,
 #ifdef WINE_NX_SWAP_POC
     SET_SWAP_SIZE,
 #endif
@@ -3205,6 +3290,7 @@ static void settings_menu( struct launcher *l )
             [SET_UPDATE] = SET_SECTION_SYSTEM,
             [SET_SETUP] = SET_SECTION_SYSTEM,
             [SET_MAKE_MAIN] = SET_SECTION_SYSTEM,
+            [SET_MAKE_32BIT] = SET_SECTION_SYSTEM,
 #ifdef WINE_NX_SWAP_POC
             [SET_SWAP_SIZE] = SET_SECTION_SYSTEM,
 #endif
@@ -3291,10 +3377,21 @@ static void settings_menu( struct launcher *l )
         snprintf( rows[SET_MAKE_MAIN].label, sizeof(rows[0].label), "Make an Autorun forwarder" );
         snprintf( rows[SET_MAKE_MAIN].value, sizeof(rows[0].value), "%s",
                   l->options->install_forwarder ? "Autorun" : "Unavailable" );
-        rows[SET_MAKE_MAIN].help = "Installs the 39-bit Autorun forwarder. Fixed-address Win32 games also "
-                                   "require the Atmosphere low-address patch. Use emuMMC only.";
+        rows[SET_MAKE_MAIN].help = "Installs the 39-bit Autorun forwarder. Fixed-address Win32 games run in it "
+                                   "with the Atmosphere low-address patch, or else in Autorun 32-bit. "
+                                   "Use emuMMC only.";
         rows[SET_MAKE_MAIN].adjustable = 0;
         rows[SET_MAKE_MAIN].disabled = !l->options->install_forwarder;
+        snprintf( rows[SET_MAKE_32BIT].label, sizeof(rows[0].label), "Make an Autorun 32-bit forwarder" );
+        snprintf( rows[SET_MAKE_32BIT].value, sizeof(rows[0].value), "%s",
+                  !l->options->install_forwarder_32bit ? "Unavailable" :
+                  l->options->title_installed && l->options->title_installed( l->options->forwarder_32bit_id )
+                  ? "Installed" : "Autorun 32-bit" );
+        rows[SET_MAKE_32BIT].help = "For Win32 games linked for a fixed address in the low 4 GB, on any "
+                                    "Atmosphere and without changing it. Such a game is sent there by itself. "
+                                    "Use emuMMC only.";
+        rows[SET_MAKE_32BIT].adjustable = 0;
+        rows[SET_MAKE_32BIT].disabled = !l->options->install_forwarder_32bit;
 #ifdef WINE_NX_SWAP_POC
         {
             int size = launcher_kv_get_int( &l->look, "swap-mb", 0 );
@@ -3366,7 +3463,10 @@ static void settings_menu( struct launcher *l )
             ui_start_screen( ui );
             break;
         case SET_MAKE_MAIN:
-            if (action == UI_ACTION_CHOOSE) make_forwarder( l );
+            if (action == UI_ACTION_CHOOSE) make_forwarder( l, 39 );
+            break;
+        case SET_MAKE_32BIT:
+            if (action == UI_ACTION_CHOOSE) make_forwarder( l, 32 );
             break;
 
 #ifdef WINE_NX_SWAP_POC

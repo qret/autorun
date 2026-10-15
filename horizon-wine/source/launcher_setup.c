@@ -23,7 +23,7 @@ struct setup_job
     const struct wine_nx_launcher_options *launcher;
     struct setup_boot_options boot;
     SDL_atomic_t done;
-    int forwarder;
+    int forwarder;  /* 0: boot patches, 39 or 32: that forwarder */
     unsigned int forwarder_result;
     enum setup_boot_result boot_result;
     char detail[512];
@@ -35,7 +35,8 @@ static int setup_worker(void *opaque)
     if (job->forwarder)
     {
         const char *step = NULL;
-        job->forwarder_result = job->launcher->install_forwarder(&step);
+        job->forwarder_result = job->forwarder == 32 ? job->launcher->install_forwarder_32bit(&step)
+                                                     : job->launcher->install_forwarder(&step);
         if (job->forwarder_result)
             snprintf(job->detail, sizeof(job->detail), "Could not install while %s (0x%X).",
                      step ? step : "writing the forwarder", job->forwarder_result);
@@ -156,7 +157,10 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
         int count = 1, action = 0, previous = step;
         int hoc_mismatch = manifest && !strcmp(hoc.path, "atmosphere/kips/hoc.kip") &&
                            (!hoc.compatible || hoc.kip_version != manifest->hoc_kip_version);
-        int items_y = step == STEP_ENTRY ? 378 : 438, row_h = step == STEP_ENTRY ? 50 : 70;
+        /* The loader step has a third way, keeping Atmosphere as it is, and
+         * gives the notice's room to it. */
+        int keep_firmware = step == STEP_LOADER && options->install_forwarder_32bit;
+        int items_y = step == STEP_ENTRY ? 378 : keep_firmware ? 358 : 438, row_h = step == STEP_ENTRY ? 50 : 70;
         char dlls_text[160], dlls_status[64];
         int dlls_ready = launcher_dlls_is_ready(dlls), tone;
         description[0] = 0;
@@ -197,6 +201,17 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
             notes[0] = "For a standard Atmosphere setup";
             notes[1] = "Keep HOC overclocking support";
             count = 2;
+            if (keep_firmware)
+            {
+                snprintf(description, sizeof(description), "Choose the loader for the Autorun boot entry, "
+                         "or keep Atmosphere exactly as it is: games linked for a fixed low address then start "
+                         "from a second HOME menu entry, Autorun 32-bit, and nothing in the firmware or the "
+                         "boot files changes.");
+                notice = NULL;
+                items[2] = "Keep my Atmosphere unchanged";
+                notes[2] = "Any build and version; installs Autorun 32-bit";
+                count = 3;
+            }
             break;
         case STEP_OVERCLOCK:
             snprintf(description, sizeof(description), "Choose which overclock settings the patched HOC loader should use. "
@@ -306,6 +321,20 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
                 if (dlls_ready || selected || launcher_dlls_install(dlls)) step = STEP_LOADER;
                 break;
             case STEP_LOADER:
+                if (selected == 2)
+                {
+                    int have = options->title_installed && options->title_installed(options->forwarder_32bit_id);
+                    if (!have)
+                    {
+                        job.forwarder = 32;
+                        if (!confirm_install(ui, options) || !run_job(ui, &job)) break;
+                    }
+                    ui_message(ui, "Setup complete", "Autorun 32-bit is on the HOME menu. Games linked for a "
+                               "fixed low address open there by themselves; every other game starts here. "
+                               "Atmosphere and the boot files were not changed.");
+                    result = 1;
+                    goto done;
+                }
                 job.boot.loader = selected ? SETUP_BOOT_HOC : SETUP_BOOT_STOCK;
                 if (!selected) job.boot.preserve_hoc = 0;
                 step = selected ? STEP_OVERCLOCK : STEP_MESOSPHERE;

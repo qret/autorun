@@ -36,6 +36,15 @@ struct wine_nx_launcher_options
     int (*schedule_restart)(void);
     /* Install the 39-bit forwarder; returns 0 or the failing Result and step. */
     unsigned int (*install_forwarder)( const char **step );
+    /* The same for the 32-bit one, which runs games linked for a fixed low
+     * address on an Atmosphere without the low-window patch. */
+    unsigned int (*install_forwarder_32bit)( const char **step );
+    /* The two forwarders' application ids, whether the console has one, and a
+     * request to close this application and open that one in its place. */
+    unsigned long long main_forwarder_id;
+    unsigned long long forwarder_32bit_id;
+    int (*title_installed)( unsigned long long id );
+    int (*launch_title)( unsigned long long id );
     unsigned int (*install_game_forwarder)( const struct wine_nx_forwarder *request, const char **step );
     const char *launch_error;
     /* The global settings on entry, as the user left them on return. The

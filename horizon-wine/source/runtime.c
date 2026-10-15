@@ -3407,25 +3407,77 @@ static void log_line_plain( const char *line )
     log_line( "%s", line );
 }
 
-static unsigned int launcher_install_forwarder( const char **step )
+/* Build the forwarder that starts this NRO with 39 or 32 bits, and install it. */
+static unsigned int launcher_install_forwarder_space( int address_space_32bit, const char **step )
 {
     struct wine_nx_forwarder request =
     {
         .nro_path = RUNTIME_DIR "/wine-nx-runtime.nro",
         .args = NULL,
-        .name = "Autorun",
+        .name = address_space_32bit ? "Autorun 32-bit" : "Autorun",
         .author = "ticoverse.com",
-        .icon = wine_nx_icon_any,
-        .icon_size = wine_nx_icon_any_size,
+        .icon = address_space_32bit ? wine_nx_icon_32bit : wine_nx_icon_any,
+        .icon_size = address_space_32bit ? wine_nx_icon_32bit_size : wine_nx_icon_any_size,
+        .address_space_32bit = address_space_32bit,
     };
     unsigned int rc;
 
     wine_nx_forwarder_report = log_line_plain;
     rc = wine_nx_forwarder_install( &request, step );
-    log_line( "[LAUNCHER] forwarder %016llx: rc=0x%x%s%s",
-              wine_nx_forwarder_title_id( request.nro_path, NULL ), rc,
+    log_line( "[LAUNCHER] %d-bit forwarder %016llx: rc=0x%x%s%s", address_space_32bit ? 32 : 39,
+              wine_nx_forwarder_title_id_space( request.nro_path, NULL, address_space_32bit ), rc,
               rc && step && *step ? " at " : "", rc && step && *step ? *step : "" );
     return rc;
+}
+
+static unsigned int launcher_install_forwarder( const char **step )
+{
+    return launcher_install_forwarder_space( 0, step );
+}
+
+static unsigned int launcher_install_forwarder_32bit( const char **step )
+{
+    return launcher_install_forwarder_space( 1, step );
+}
+
+/* Whether the console has this application. */
+static int launcher_title_installed( unsigned long long id )
+{
+    bool installed = false;
+
+    if (!id || R_FAILED( nsInitialize() )) return 0;
+    if (R_FAILED( nsIsAnyApplicationEntityInstalled( id, &installed ) )) installed = false;
+    nsExit();
+    return installed;
+}
+
+/* Asks the console to close this application and open that one. */
+static int launcher_launch_title( unsigned long long id )
+{
+    Result rc = appletRequestLaunchApplication( id, NULL );
+
+    if (R_FAILED( rc )) log_line( "[LAUNCHER] could not start %016llx: rc=0x%x", id, (unsigned)rc );
+    else log_line( "[LAUNCHER] handing over to %016llx", id );
+    return R_SUCCEEDED( rc );
+}
+
+/* Leave the program in run-next.txt for Autorun 32-bit and ask the console for
+ * it. Returns what the launcher shows meanwhile, or why it could not. */
+static const char *runtime_hand_over_32bit( const char *program )
+{
+    unsigned long long id = wine_nx_forwarder_title_id_space( RUNTIME_DIR "/wine-nx-runtime.nro", NULL, 1 );
+
+    log_line( "[LAUNCHER] %s needs the low 4 GB; handing it to Autorun 32-bit", program );
+    if (!launcher_title_installed( id ))
+        return "This game needs the low 4 GB. Install Autorun 32-bit in Settings > System.";
+    if (!write_line( WINE_NX_RUNTIME_ROOT "/run-next.txt", program ))
+        return "Could not write run-next.txt for Autorun 32-bit.";
+    if (!launcher_launch_title( id ))
+    {
+        remove( WINE_NX_RUNTIME_ROOT "/run-next.txt" );
+        return "The console refused to open Autorun 32-bit.";
+    }
+    return "Opening Autorun 32-bit...";
 }
 
 static unsigned int launcher_install_game_forwarder( const struct wine_nx_forwarder *request, const char **step )
@@ -3696,6 +3748,23 @@ int main( int argc, char **argv )
             resumed_program = autorun = 0;
         }
     }
+    /* A program linked for a fixed low address cannot run in a 39-bit process
+     * without the low window, however it came here. The launcher hands such a
+     * game over itself; a HOME menu shortcut, run-next.txt (which this forwarder
+     * may pick up before Autorun 32-bit does, and then run the components setup
+     * first) and the command line do not, so they are handed over here. */
+    if ((forwarded_game > 0 || resumed_program || (!forwarded_game && argc > 1 && argv[1] && argv[1][0])) &&
+        !low_window_available && runtime_address_space_bits() == 39)
+    {
+        const char *program = forwarded_game > 0 || resumed_program ? target : argv[1];
+
+        if (launcher_program_address_space( program ) == LAUNCHER_ADDRESS_LOW)
+        {
+            launch_error = runtime_hand_over_32bit( program );
+            forwarded_game = -1;
+            resumed_program = autorun = 0;
+        }
+    }
     if (forwarded_game > 0 || resumed_program || (!forwarded_game && argc > 1 && argv[1] && argv[1][0]))
     {
         const char *name;
@@ -3723,6 +3792,11 @@ int main( int argc, char **argv )
             .reopen_launcher = runtime_reopen_launcher,
             .dxvk_on_add = runtime_dxvk_on_add,
             .install_forwarder = launcher_install_forwarder,
+            .install_forwarder_32bit = launcher_install_forwarder_32bit,
+            .main_forwarder_id = wine_nx_forwarder_title_id_space( RUNTIME_DIR "/wine-nx-runtime.nro", NULL, 0 ),
+            .forwarder_32bit_id = wine_nx_forwarder_title_id_space( RUNTIME_DIR "/wine-nx-runtime.nro", NULL, 1 ),
+            .title_installed = launcher_title_installed,
+            .launch_title = launcher_launch_title,
             .install_game_forwarder = launcher_install_game_forwarder,
             .launch_error = launch_error,
             .schedule_restart = envHasNextLoad() ? launcher_schedule_restart : NULL,

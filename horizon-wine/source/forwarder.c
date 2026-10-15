@@ -681,7 +681,13 @@ static int exosphere_moved_debug_flags( void )
     return moved;
 }
 
-static int npdm_patch( u8 *npdm, size_t size, u64 tid )
+/* The NPDM AddressSpaceType field, written straight into meta.flags. Type 2 is
+ * the 32-bit space with the gigabyte the alias region would take left in the
+ * map region, where images, stacks and the GPU driver's aliases go. */
+#define NPDM_SPACE_32BIT_NO_ALIAS 2u
+#define NPDM_SPACE_39BIT 3u
+
+static int npdm_patch( u8 *npdm, size_t size, u64 tid, unsigned int address_space )
 {
     const u8 ADDRESS_SPACE_SHIFT = 1;
     const u8 ADDRESS_SPACE_MASK = 0x7 << 1;
@@ -699,7 +705,7 @@ static int npdm_patch( u8 *npdm, size_t size, u64 tid )
 
     snprintf( meta.title_name, sizeof(meta.title_name), "%s", "Application" );
     memset( meta.product_code, 0, sizeof(meta.product_code) );
-    meta.flags = (meta.flags & ~ADDRESS_SPACE_MASK) | (3u << ADDRESS_SPACE_SHIFT);
+    meta.flags = (meta.flags & ~ADDRESS_SPACE_MASK) | (u8)(address_space << ADDRESS_SPACE_SHIFT);
     meta.sys_resource_size = 16 * 1024 * 1024;
     aci0.program_id = tid;
     acid.program_id_min = tid;
@@ -918,24 +924,32 @@ static void compare_with_installed( u64 other_tid, NcmStorageId storage_id, cons
  * goes in. Generation 0 is sphaira's naming, which is never ours to touch. */
 #define FORWARDER_GENERATION 2
 
-static void forwarder_hash( const char *nro_path, const char *args, int generation, u64 *hash )
+static void forwarder_hash( const char *nro_path, const char *args, unsigned int address_space, int generation,
+                            u64 *hash )
 {
     char full[1024], both[2200];
 
     if (args && args[0]) snprintf( full, sizeof(full), "%s %s", nro_path, args );
     else snprintf( full, sizeof(full), "%s", nro_path );
     if (!generation) snprintf( both, sizeof(both), "%s%s", nro_path, full );
-    else if (generation == 1) snprintf( both, sizeof(both), "%s%s\naddress-space=3", nro_path, full );
-    else snprintf( both, sizeof(both), "%s%s\naddress-space=3\nautorun-forwarder=%d", nro_path, full, generation );
+    else if (generation == 1) snprintf( both, sizeof(both), "%s%s\naddress-space=%u", nro_path, full, address_space );
+    else snprintf( both, sizeof(both), "%s%s\naddress-space=%u\nautorun-forwarder=%d", nro_path, full,
+                   address_space, generation );
     sha256CalculateHash( hash, both, strlen( both ) );
+}
+
+unsigned long long wine_nx_forwarder_title_id_space( const char *nro_path, const char *args, int address_space_32bit )
+{
+    u64 hash[SHA256_HASH_SIZE / sizeof(u64)];
+
+    forwarder_hash( nro_path, args, address_space_32bit ? NPDM_SPACE_32BIT_NO_ALIAS : NPDM_SPACE_39BIT,
+                    FORWARDER_GENERATION, hash );
+    return 0x0500000000000000ull | (hash[0] & 0x00FFFFFFFFFFF000ull);
 }
 
 unsigned long long wine_nx_forwarder_title_id( const char *nro_path, const char *args )
 {
-    u64 hash[SHA256_HASH_SIZE / sizeof(u64)];
-
-    forwarder_hash( nro_path, args, FORWARDER_GENERATION, hash );
-    return 0x0500000000000000ull | (hash[0] & 0x00FFFFFFFFFFF000ull);
+    return wine_nx_forwarder_title_id_space( nro_path, args, 0 );
 }
 
 unsigned long long wine_nx_forwarder_game_title_id( unsigned int game_id )
@@ -988,7 +1002,8 @@ static Result forwarder_build_and_install( const struct wine_nx_forwarder *reque
     /* The program: the loader, and what it is to start. */
     *step = "building the program";
     memcpy( npdm, wine_nx_hbl_npdm, wine_nx_hbl_npdm_size );
-    if (!npdm_patch( npdm, wine_nx_hbl_npdm_size, tid ))
+    if (!npdm_patch( npdm, wine_nx_hbl_npdm_size, tid,
+                     request->address_space_32bit ? NPDM_SPACE_32BIT_NO_ALIAS : NPDM_SPACE_39BIT ))
     { rc = MAKERESULT( Module_Libnx, LibnxError_BadInput ); goto done; }
     exefs[0] = (struct file_entry){ "main", wine_nx_hbl_main, wine_nx_hbl_main_size };
     exefs[1] = (struct file_entry){ "main.npdm", npdm, wine_nx_hbl_npdm_size };
@@ -1199,6 +1214,7 @@ unsigned int wine_nx_forwarder_install( const struct wine_nx_forwarder *request,
     u8 header_kek[0x20], header_key[0x20];
     u64 tid, old_tid, plain_tid;
     u64 hash[SHA256_HASH_SIZE / sizeof(u64)];
+    unsigned int space;
     Result rc;
 
     if (!step) step = &ignored;
@@ -1206,18 +1222,20 @@ unsigned int wine_nx_forwarder_install( const struct wine_nx_forwarder *request,
     if (!request || !request->nro_path || !request->icon || !request->icon_size ||
         request->icon_size > 0x20000 || !request->name || !request->name[0] ||
         strlen( request->name ) >= 0x200 || !request->author || strlen( request->author ) >= 0x100 ||
-        strlen( request->nro_path ) + (request->args ? strlen( request->args ) + 1 : 0) >= 1024)
+        strlen( request->nro_path ) + (request->args ? strlen( request->args ) + 1 : 0) >= 1024 ||
+        (request->game_id && request->address_space_32bit))
         return MAKERESULT( Module_Libnx, LibnxError_BadInput );
+    space = request->address_space_32bit ? NPDM_SPACE_32BIT_NO_ALIAS : NPDM_SPACE_39BIT;
 
-    forwarder_hash( request->nro_path, request->args, FORWARDER_GENERATION, hash );
+    forwarder_hash( request->nro_path, request->args, space, FORWARDER_GENERATION, hash );
     tid = 0x0500000000000000ull | (hash[0] & 0x00FFFFFFFFFFF000ull);
     /* The generation before: this program's own, and very likely broken. */
-    forwarder_hash( request->nro_path, request->args, FORWARDER_GENERATION - 1, hash );
+    forwarder_hash( request->nro_path, request->args, space, FORWARDER_GENERATION - 1, hash );
     old_tid = 0x0500000000000000ull | (hash[0] & 0x00FFFFFFFFFFF000ull);
     /* What this NRO's forwarder was called before the address space was part of
      * the name, and what sphaira calls one: both are the same entry as this,
      * made for the same NRO, so they are taken away rather than left behind. */
-    forwarder_hash( request->nro_path, request->args, 0, hash );
+    forwarder_hash( request->nro_path, request->args, space, 0, hash );
     plain_tid = 0x0500000000000000ull | (hash[0] & 0x00FFFFFFFFFFF000ull);
     if (request->game_id)
     {

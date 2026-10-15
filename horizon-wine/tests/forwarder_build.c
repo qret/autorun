@@ -287,6 +287,10 @@ static void check_program( const u8 *data, size_t size, const char *nro_path )
     assert( found == 3 );
 }
 
+/* The NPDM address space type the next check expects: 3 is 39-bit, 2 the
+ * 32-bit space without the alias region. */
+static unsigned int expected_address_space = 3;
+
 static void check_exefs_npdm( const u8 *data, u64 tid, int relay )
 {
     const struct nca_header *header = nca_of( data );
@@ -322,7 +326,7 @@ static void check_exefs_npdm( const u8 *data, u64 tid, int relay )
     assert( meta );
     assert( !memcmp( &meta->magic, "META", 4 ) );
     /* The three bits that decide where the program's address space begins. */
-    assert( ((meta->flags >> 1) & 7) == 3 );
+    assert( ((meta->flags >> 1) & 7) == expected_address_space );
     assert( meta->sys_resource_size == 16 * 1024 * 1024 );
     aci0 = (const struct npdm_aci0 *)((const u8 *)meta + meta->aci0_offset);
     acid = (const struct npdm_acid *)((const u8 *)meta + meta->acid_offset);
@@ -448,7 +452,7 @@ int main( int argc, char **argv )
     sha256CalculateHash( plain_hash, title_key, strlen( title_key ) );
     assert( wine_nx_forwarder_title_id( nro_path, NULL ) ==
             (0x0500000000000000ull | (plain_hash[0] & 0x00FFFFFFFFFFF000ull)) );
-    forwarder_hash( nro_file, NULL, 0, plain_hash );
+    forwarder_hash( nro_file, NULL, NPDM_SPACE_39BIT, 0, plain_hash );
     plain_tid = 0x0500000000000000ull | (plain_hash[0] & 0x00FFFFFFFFFFF000ull);
     assert( tid != plain_tid );
 
@@ -488,7 +492,37 @@ int main( int argc, char **argv )
     check_exefs_npdm( program, tid, 0 );
     free( program );
 
+    /* The 32-bit forwarder is an entry of its own, named as it was before the
+     * 32-bit forwarders were retired, and installing it leaves the 39-bit one. */
+    {
+        u64 tid32 = wine_nx_forwarder_title_id_space( nro_file, NULL, 1 );
+
+        assert( wine_nx_forwarder_title_id_space( nro_file, NULL, 0 ) == tid );
+        assert( tid32 != tid && (tid32 >> 56) == 0x05 && !(tid32 & 0xFFF) );
+        snprintf( title_key, sizeof(title_key), "%s%s\naddress-space=2\nautorun-forwarder=2", nro_path, nro_path );
+        sha256CalculateHash( plain_hash, title_key, strlen( title_key ) );
+        assert( wine_nx_forwarder_title_id_space( nro_path, NULL, 1 ) ==
+                (0x0500000000000000ull | (plain_hash[0] & 0x00FFFFFFFFFFF000ull)) );
+        request.address_space_32bit = 1;
+        placeholders = registered = deleted_completely_count = deleted_after_write = 0;
+        assert( !wine_nx_forwarder_install( &request, &step ) );
+        assert( registered == 3 && deleted_entity == tid32 && !deleted_after_write );
+        assert( deleted_completely_count == 2 && deleted_completely[1] == tid32 );
+        for (int i = 0; i < deleted_completely_count; i++)
+            assert( deleted_completely[i] != tid && deleted_completely[i] != plain_tid );
+        program = read_nca( 1, &program_size );
+        expected_address_space = 2;
+        check_exefs_npdm( program, tid32, 0 );
+        expected_address_space = 3;
+        free( program );
+        request.address_space_32bit = 0;
+    }
+
+    /* A game forwarder relays to the 39-bit one and is never made 32-bit. */
     request.game_id = 42;
+    request.address_space_32bit = 1;
+    assert( wine_nx_forwarder_install( &request, &step ) );
+    request.address_space_32bit = 0;
     placeholders = registered = deleted_completely_count = deleted_after_write = 0;
     tid = wine_nx_forwarder_game_title_id( 42 );
     assert( tid != wine_nx_forwarder_title_id( nro_file, NULL ) );
