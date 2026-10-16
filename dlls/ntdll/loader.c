@@ -4967,6 +4967,23 @@ static NTSTATUS find_dll_file( const WCHAR *load_path, const WCHAR *libname, UNI
 
     if (RtlDetermineDosPathNameType_U( libname ) == RtlPathTypeRelative)
     {
+#ifdef __arm64ec__
+        /* A program's own C runtime is x64 code, and every Wine module here
+         * imports the C runtime as ARM64EC code with no exit thunk: bound to
+         * the program's copy, shell32's memset jumps to shell32's base. A Java
+         * runtime ships one beside java.exe. Wine's serves both, through its
+         * x64 export thunks, so only system32 is searched for it. */
+        if (!wcsicmp( libname, L"ucrtbase.dll" ) || !wcsicmp( libname, L"msvcrt.dll" ) ||
+            !wcsicmp( libname, L"ucrtbase" ) || !wcsicmp( libname, L"msvcrt" ))
+        {
+            static BOOL said;
+
+            if (!said) wine_nx_trace( "[LDR] the C runtime comes from system32 only: a program's "
+                                      "own x64 copy cannot serve Wine's ARM64EC modules" );
+            said = TRUE;
+            load_path = system_dir;
+        }
+#endif
         status = search_dll_file( load_path, libname, nt_name, pwm, mapping, image_info, id );
 #ifdef __SWITCH__
         if (status != STATUS_SUCCESS && status != STATUS_NO_MEMORY)
