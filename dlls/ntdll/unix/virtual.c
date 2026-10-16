@@ -3973,6 +3973,26 @@ static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_inf
     if ((void *)limit_high > host_addr_space_limit) limit_high = (ULONG_PTR)host_addr_space_limit;
 #endif
 
+#ifdef __SWITCH__
+    /* The alias window (low_window.c): a 32-bit image that wants a base below
+     * 128 MiB and cannot move lives at window + base, and Box64 adds the window
+     * to the guest's addresses there. Its base stays the one it asked for, so it
+     * is not relocated; a pointer to it cut to 32 bits is its guest address. */
+    {
+        extern uintptr_t wine_nx_box64_window_base __attribute__((weak));
+        ULONG_PTR window = &wine_nx_box64_window_base ? wine_nx_box64_window_base : 0;
+
+        if (window && image_info->machine == IMAGE_FILE_MACHINE_I386 && !image_info->map_addr &&
+            !(image_info->image_flags & IMAGE_FLAGS_ImageDynamicallyRelocated) &&
+            image_info->base >= 0x10000 && image_info->base < 0x8000000 && size <= 0x8000000 - image_info->base)
+        {
+            base = (void *)(window + (ULONG_PTR)image_info->base);
+            status = map_view( view_ret, base, size, alloc_type, vprot, 0, 0, 0 );
+            horizon_trace( "[IV] map_view(window %p) -> 0x%x", base, status );
+            if (!status) return status;
+        }
+    }
+#endif
     /* first try the specified base */
 
     if (image_info->map_addr)
@@ -8123,6 +8143,19 @@ NTSTATUS WINAPI NtResetWriteWatch( HANDLE process, PVOID base, SIZE_T size )
  *             NtReadVirtualMemory   (NTDLL.@)
  *             ZwReadVirtualMemory   (NTDLL.@)
  */
+#ifdef __SWITCH__
+/* A guest address in the alias window (low_window.c) is reached at its base:
+ * nothing else can be below 128 MiB in a 39-bit process. */
+static void *window_address( const void *addr )
+{
+    extern uintptr_t wine_nx_box64_window_base __attribute__((weak));
+    ULONG_PTR window = &wine_nx_box64_window_base ? wine_nx_box64_window_base : 0;
+
+    if (window && (ULONG_PTR)addr >= 0x10000 && (ULONG_PTR)addr < 0x8000000) return (char *)window + (ULONG_PTR)addr;
+    return (void *)addr;
+}
+#endif
+
 NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buffer,
                                      SIZE_T size, SIZE_T *bytes_read )
 {
@@ -8135,6 +8168,9 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
     }
     else if (process == GetCurrentProcess())
     {
+#ifdef __SWITCH__
+        addr = window_address( addr );
+#endif
         __TRY
         {
             memmove( buffer, addr, size );
@@ -8179,6 +8215,9 @@ NTSTATUS WINAPI NtWriteVirtualMemory( HANDLE process, void *addr, const void *bu
     }
     else if (process == GetCurrentProcess())
     {
+#ifdef __SWITCH__
+        addr = window_address( addr );
+#endif
         if ((status = virtual_uninterrupted_write_memory( addr, buffer, size ))) size = 0;
     }
     else

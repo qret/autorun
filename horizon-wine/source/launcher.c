@@ -1981,8 +1981,15 @@ static int next_state( int state, int direction )
  * or what its own header says when it was told nothing. */
 static int program_needs_low( struct program *p )
 {
-    if (p->settings.address_space >= 0) return p->settings.address_space;
+    if (p->settings.address_space >= 0) return p->settings.address_space != 0;
     return launcher_program_address_space( p->path ) == LAUNCHER_ADDRESS_LOW;
+}
+
+/* Set to Window and this 39-bit process has room for the alias window: the game
+ * runs here, through Box64, its fixed-low image moved by the window's base. */
+static int program_runs_in_window( struct launcher *l, struct program *p )
+{
+    return p->settings.address_space == 2 && l->options->address_space_bits == 39 && l->options->alias_window;
 }
 
 /* Whether this process can run it at all. Nothing here can widen or narrow the
@@ -1991,7 +1998,8 @@ static int program_needs_low( struct program *p )
 static int address_space_fits( struct launcher *l, struct program *p )
 {
     if (l->options->address_space_bits == 32) return 1;
-    return l->options->address_space_bits == 39 && (l->options->low_window || !program_needs_low( p ));
+    return l->options->address_space_bits == 39 &&
+           (l->options->low_window || !program_needs_low( p ) || program_runs_in_window( l, p ));
 }
 
 /* The forwarder the game should start from instead of this one, or 0 to start
@@ -2002,7 +2010,7 @@ static int address_space_fits( struct launcher *l, struct program *p )
 static unsigned long long forwarder_for( struct launcher *l, struct program *p )
 {
     const struct wine_nx_launcher_options *o = l->options;
-    int low = program_needs_low( p );
+    int low = program_needs_low( p ) && !program_runs_in_window( l, p );
 
     if (!o->launch_title || !o->title_installed) return 0;
     if (o->address_space_bits == 39 && !o->low_window && low && o->forwarder_32bit_id) return o->forwarder_32bit_id;
@@ -2506,11 +2514,13 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 
             ADD_ROW( ROW_ADDRESS, SECTION_EMULATION, "Address space",
                      "Auto reads the game's header: one linked for a fixed address in the low 4 GB starts from "
-                     "Autorun 32-bit. 32-bit and Any override a header that does not tell the truth." );
+                     "Autorun 32-bit. 32-bit and Any override a header that does not tell the truth. Window "
+                     "(experimental) keeps such a game in this Autorun with all of its memory, through Box64." );
             row->kind = UI_ROW_DROPDOWN;
-            row->choices = 3;
+            row->choices = 4;
             if (p->settings.address_space >= 0)
-                snprintf( row->value, sizeof(row->value), "%s", p->settings.address_space ? "32-bit" : "Any" );
+                snprintf( row->value, sizeof(row->value), "%s", p->settings.address_space == 2 ? "Window" :
+                          p->settings.address_space ? "32-bit" : "Any" );
             else snprintf( row->value, sizeof(row->value), "Auto (%s)",
                            needs == LAUNCHER_ADDRESS_LOW ? "32-bit" : needs == LAUNCHER_ADDRESS_ANY ? "any" : "unread" );
         }
@@ -2886,9 +2896,9 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 #endif
         case ROW_ADDRESS:
         {
-            /* Auto, then the two answers, so either can be forced. */
-            static const int values[3] = { -1, 1, 0 };
-            struct ui_row items[3] = {0};
+            /* Auto, then the answers, so any can be forced. */
+            static const int values[4] = { -1, 1, 0, 2 };
+            struct ui_row items[4] = {0};
             int selected;
 
             if (action == UI_ACTION_RESET) selected = 0;
@@ -2897,8 +2907,10 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
                 snprintf( items[0].label, sizeof(items[0].label), "Auto" );
                 snprintf( items[1].label, sizeof(items[1].label), "32-bit" );
                 snprintf( items[2].label, sizeof(items[2].label), "Any" );
-                selected = ui_settings_dropdown( ui, &list, items, 3,
-                                                 p->settings.address_space < 0 ? 0 : p->settings.address_space ? 1 : 2 );
+                snprintf( items[3].label, sizeof(items[3].label), "Window" );
+                selected = ui_settings_dropdown( ui, &list, items, 4,
+                                                 p->settings.address_space < 0 ? 0 : p->settings.address_space == 2 ? 3 :
+                                                 p->settings.address_space ? 1 : 2 );
                 if (selected < 0) break;
             }
             else break;

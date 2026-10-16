@@ -2272,8 +2272,13 @@ extern void (*wine_nx_wow64_thread_start)( PRTL_THREAD_START_ROUTINE, void *, BO
 
 static NTSTATUS runtime_init_x86_context( TEB *teb, void *entry, void *arg )
 {
+    extern uintptr_t wine_nx_box64_window_base __attribute__((weak));
     I386_CONTEXT *ctx = get_cpu_area( get_thread_data(), IMAGE_FILE_MACHINE_I386 );
     XMM_SAVE_AREA32 fx = {0};
+    uintptr_t window = &wine_nx_box64_window_base ? wine_nx_box64_window_base : 0;
+
+    /* An entry point in the alias window is the guest's address plus its base. */
+    if (window && (uintptr_t)entry - window < 0x8000000) entry = (void *)((uintptr_t)entry - window);
     if (!ctx || !get_wow_teb(teb) || !pLdrSystemDllInitBlock ||
         !pLdrSystemDllInitBlock->pRtlUserThreadStart || (ULONG_PTR)entry > 0xffffffff ||
         (ULONG_PTR)arg > 0xffffffff) return STATUS_INVALID_PARAMETER;
@@ -3473,9 +3478,24 @@ static int runtime_program_needs_low( const char *program )
         launcher_kv_load( &kv, path ))
     {
         launcher_settings_read( &kv, &settings );
-        if (settings.address_space >= 0) return settings.address_space;
+        if (settings.address_space >= 0) return settings.address_space != 0;
     }
     return launcher_program_address_space( program ) == LAUNCHER_ADDRESS_LOW;
+}
+
+/* Whether a program is set to run through the alias window (launcher.c,
+ * program_runs_in_window). */
+static int runtime_program_window( const char *program )
+{
+    struct launcher_kv kv;
+    struct launcher_settings settings;
+    char path[512];
+
+    if (program[1] == ':' || !launcher_program_settings_path( RUNTIME_DIR, program, path, sizeof(path) ) ||
+        !launcher_kv_load( &kv, path ))
+        return 0;
+    launcher_settings_read( &kv, &settings );
+    return settings.address_space == 2;
 }
 
 /* Leave the program in run-next.txt for Autorun 32-bit and ask the console for
@@ -3567,7 +3587,7 @@ int main( int argc, char **argv )
     unsigned int attach_status = STATUS_INVALID_IMAGE_FORMAT;
     int autorun, resumed_program = 0, forwarded_game;
     const char *launch_error = NULL;
-    int low_window_available;
+    int low_window_available, alias_window_available = 0, window_game = 0;
     USHORT target_machine;
     int sd_cache = wine_nx_sd_cache_install();  /* before any file on the card is opened */
 
@@ -3635,8 +3655,9 @@ int main( int argc, char **argv )
     log_line( "[LOWVA] forwarder title %016llx", runtime_title_id() );
     low_window_available = wine_nx_low_window_probe( log_line_plain );
     /* Without the low window, whether this console has room for the alias
-     * window. It only looks and gives the pages back; nothing uses it yet. */
-    if (!low_window_available && runtime_address_space_bits() == 39) wine_nx_alias_window_probe( log_line_plain );
+     * window: a game set to Window then runs here (launcher.c). */
+    if (!low_window_available && runtime_address_space_bits() == 39)
+        alias_window_available = wine_nx_alias_window_probe( log_line_plain );
     {
         int recovered = autorun_install_recover( RUNTIME_DIR, strstr( own_nro, "/updates/previous.nro" ) != NULL );
         if (recovered < 0)
@@ -3778,7 +3799,7 @@ int main( int argc, char **argv )
     {
         const char *program = forwarded_game > 0 || resumed_program ? target : argv[1];
 
-        if (runtime_program_needs_low( program ))
+        if (runtime_program_needs_low( program ) && !(alias_window_available && runtime_program_window( program )))
         {
             launch_error = runtime_hand_over_32bit( program );
             forwarded_game = -1;
@@ -3807,6 +3828,7 @@ int main( int argc, char **argv )
 #endif
             .address_space_bits = runtime_address_space_bits(),
             .low_window = low_window_available,
+            .alias_window = alias_window_available,
             .four_cores_available = wine_nx_four_cores_available(),
             .own_forwarder = runtime_title_id() == wine_nx_forwarder_title_id( RUNTIME_DIR "/wine-nx-runtime.nro", NULL ),
             .reopen_launcher = runtime_reopen_launcher,
@@ -3930,6 +3952,13 @@ int main( int argc, char **argv )
 #ifdef WINE_NX_FEX
             runtime_fex = settings.fex;
 #endif
+            /* Set to Window, with room for it: only Box64 reaches the window. */
+            if (settings.address_space == 2 && alias_window_available && !low_window_available &&
+                runtime_address_space_bits() == 39)
+            {
+                window_game = 1;
+                runtime_fex = 0;
+            }
             runtime_four_cores = settings.four_cores;
             if (settings.verbose >= 0) wine_nx_runtime_verbose = settings.verbose;
             if (settings.profile >= 0) runtime_profile = settings.profile;
@@ -4049,6 +4078,23 @@ int main( int argc, char **argv )
     }
     log_line( "[CPU] %s", target_machine == IMAGE_FILE_MACHINE_ARM64 ? "Native ARM64" :
                          runtime_fex ? "FEX-2609" : "Box64" );
+    /* Before any guest code runs or its image is mapped: keep the window's
+     * addresses for it and tell Box64 where it is. */
+    if (window_game && target_machine == IMAGE_FILE_MACHINE_I386)
+    {
+        extern BOOL wine_nx_box64_set_window( uintptr_t base ) __attribute__((weak));
+        uintptr_t base = wine_nx_alias_window_reserve();
+
+        if (base && wine_nx_box64_set_window && wine_nx_box64_set_window( base ))
+            log_line( "[WINDOW] in use: guest addresses below 128 MiB live at %010llx", (unsigned long long)base );
+        else
+        {
+            log_line( "[WINDOW] FAIL: no window for this game (base %010llx); it goes to Autorun 32-bit",
+                      (unsigned long long)base );
+            launch_error = runtime_hand_over_32bit( target );
+            return return_to_launcher();
+        }
+    }
 #ifdef WINE_NX_AMD64
     if (target_machine == IMAGE_FILE_MACHINE_AMD64)
     {

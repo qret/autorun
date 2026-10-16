@@ -32,7 +32,7 @@ fixture = r'''
 #include <stdio.h>
 enum launcher_address_space { LAUNCHER_ADDRESS_LOW, LAUNCHER_ADDRESS_ANY };
 static enum launcher_address_space detected;
-struct options { int address_space_bits, low_window; };
+struct options { int address_space_bits, low_window, alias_window; };
 struct launcher { struct options *options; };
 struct launcher_settings { int address_space; };
 struct program { const char *path; struct launcher_settings settings; };
@@ -40,11 +40,12 @@ static enum launcher_address_space launcher_program_address_space(const char *pa
 { (void)path; return detected; }
 '''
 fixture += function('static int program_needs_low(')
+fixture += function('static int program_runs_in_window(')
 fixture += function('static int address_space_fits(')
 fixture += r'''
 int main(void)
 {
-    struct options o = {39, 0};
+    struct options o = {39, 0, 0};
     struct launcher l = {&o};
     struct program p = {"fixed.exe", {-1}};
     detected = LAUNCHER_ADDRESS_LOW;
@@ -65,6 +66,14 @@ int main(void)
     assert(!address_space_fits(&l, &p));
     detected = LAUNCHER_ADDRESS_LOW;
     p.settings.address_space = 0;
+    assert(address_space_fits(&l, &p));
+    /* Window: a fixed-low game stays in the 39-bit process only when the alias
+     * window has room there. */
+    p.settings.address_space = 2;
+    assert(!address_space_fits(&l, &p));
+    o.alias_window = 1;
+    assert(address_space_fits(&l, &p));
+    o.address_space_bits = 32;
     assert(address_space_fits(&l, &p));
     puts("Low window: verified forwarder ID and 39-bit capability gating passed");
 }

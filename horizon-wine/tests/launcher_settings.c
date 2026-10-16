@@ -98,7 +98,13 @@ static void test_settings( const char *dir )
     load_text( &kv, "address-space=bogus\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.address_space == -1 );
-    settings.address_space = 2;
+    /* Window: the alias window of the 39-bit process, written and read back. */
+    load_text( &kv, "address-space=window\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.address_space == 2 && launcher_settings_write( &kv, &settings ) );
+    launcher_settings_read( &kv, &back );
+    assert( back.address_space == 2 && strstr( kv.text, "address-space=window" ) );
+    settings.address_space = 3;
     assert( !launcher_settings_write( &kv, &settings ) );
     settings.address_space = -1;
     load_text( &kv, "cpu=box64\n" );

@@ -261,6 +261,9 @@ static void recover_translated_state( x64emu_t *emu, ULONG_PTR pc, const unsigne
 BOOL wine_nx_box64_handle_fault( ULONG_PTR address, ULONG access, ULONG_PTR pc,
                                  const unsigned long long *x )
 {
+    /* A fault in the alias window is the guest's at its own address. */
+    if (wine_nx_box64_window_base && address - wine_nx_box64_window_base < 0x8000000)
+        address -= wine_nx_box64_window_base;
     if (!active_engine || !guest_address_valid( active_engine, address, 1 )) return FALSE;
 #ifdef WINE_NX_BOX64_DYNAREC
     extern void *current_helper;

@@ -188,7 +188,8 @@ struct launcher_settings
     int fex;
     int four_cores;
     /* What the program needs of the address space (launcher_catalog.h): -1 read it
-     * from the program's own header, 0 any, 1 the low 4 GB of Autorun 32-bit. */
+     * from the program's own header, 0 any, 1 the low 4 GB of Autorun 32-bit, 2 the
+     * low addresses through the alias window of the 39-bit process (Box64 only). */
     int address_space;
     int framebuffer;  /* 1: windows go to the framebuffer, 0: through the compositor */
     enum launcher_d3d_renderer d3d;
@@ -411,6 +412,7 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     {
         if (!strcasecmp( value, "32-bit" ) || !strcmp( value, "32" )) settings->address_space = 1;
         else if (!strcasecmp( value, "any" )) settings->address_space = 0;
+        else if (!strcasecmp( value, "window" )) settings->address_space = 2;
     }
     settings->framebuffer = -1;
     if (launcher_kv_get( kv, "windows", value, sizeof(value) ))
@@ -482,7 +484,7 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
     static const char *states[] = { NULL, "0", "1" };
 
     if (settings->d3d < LAUNCHER_D3D_WINE || settings->d3d > LAUNCHER_D3D_DXVK_VKD3D ||
-        settings->address_space < -1 || settings->address_space > 1 ||
+        settings->address_space < -1 || settings->address_space > 2 ||
         settings->dxvk_hud < 0 || settings->dxvk_hud >= LAUNCHER_HUD_COUNT ||
         settings->dxvk_source < 0 || settings->dxvk_source >= DXVK_SOURCE_COUNT ||
         settings->frame_limit < 0 || settings->frame_limit >= LAUNCHER_FRAME_LIMIT_COUNT ||
@@ -497,6 +499,7 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "cpu", settings->fex ? NULL : "box64" ) &&
            launcher_kv_set( kv, "four-cores", settings->four_cores ? NULL : "0" ) &&
            launcher_kv_set( kv, "address-space", settings->address_space < 0 ? NULL :
+                                                 settings->address_space == 2 ? "window" :
                                                  settings->address_space ? "32-bit" : "any" ) &&
            launcher_kv_set( kv, "windows", settings->framebuffer < 0 ? NULL :
                                            settings->framebuffer ? "framebuffer" : "compositor" ) &&

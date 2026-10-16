@@ -207,6 +207,23 @@ static int alias_window_choose( const struct alias_layout *layout, u64 *base, un
     return 0;
 }
 
+/* The same choice as the probe, kept for good: libnx leaves reserved addresses
+ * alone, so nothing else lands in the window before the guest's image does. */
+uintptr_t wine_nx_alias_window_reserve(void)
+{
+    static uintptr_t reserved;
+    struct alias_layout layout;
+    unsigned int tried;
+    u64 base = 0;
+
+    virtmemLock();
+    if (!reserved && alias_window_layout( &layout ) && alias_window_choose( &layout, &base, &tried ) &&
+        __real_virtmemAddReservation( (void *)(uintptr_t)base, WINE_NX_ALIAS_WINDOW_SIZE ))
+        reserved = base;
+    virtmemUnlock();
+    return reserved;
+}
+
 int wine_nx_alias_window_probe( void (*report)( const char * ) )
 {
     struct alias_layout layout;

@@ -55,7 +55,10 @@ static void invalidate( const void *address, SIZE_T size, BOOL destroy )
 {
     struct winebox64_invalidate_params params = { WINEBOX64_ABI_VERSION, sizeof(params) };
 
-    if (!gates.syscall || !size || (ULONG_PTR)address > 0xffffffff) return;
+    /* A report may give a place in the alias window, base + guest address: the
+     * low half is the guest's. */
+    if ((ULONG_PTR)address > 0xffffffff) address = ULongToPtr( PtrToUlong( address ) );
+    if (!gates.syscall || !size) return;
     params.address = (ULONG_PTR)address;
     params.length = size;
     params.destroy = destroy;

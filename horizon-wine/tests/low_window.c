@@ -179,12 +179,17 @@ static void alias_window_tests(void)
     alias_layout_with_gaps();
     permission_fail = 1;
     assert(!wine_nx_alias_window_probe(report_window) && !mapped_address && logs == 3);
+    /* The reservation keeps the probe's choice for the rest of the process, once. */
+    alias_layout_with_gaps();
+    assert(wine_nx_alias_window_reserve() == 0x400000000 && reserved_count == 1);
+    assert(reservation.base == 0x400000000 && reservation.size == WINE_NX_ALIAS_WINDOW_SIZE);
+    assert(wine_nx_alias_window_reserve() == 0x400000000 && reserved_count == 1);
 #ifdef __aarch64__
     alias_layout_with_gaps();
     assert(wine_nx_alias_window_probe(report_window) && mapped_count == 2 && !mapped_address && logs == 4);
     puts("Alias window: AArch64 execution at base + 0x400000 and a writable page at its top passed (mock SVCs)");
 #endif
-    puts("Alias window: base choice around heap, alias, stack and thread-local pages, and failure cleanup passed");
+    puts("Alias window: base choice around heap, alias, stack and thread-local pages, reservation and failure cleanup passed");
 }
 static void *worker(void *unused)
 {

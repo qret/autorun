@@ -21,5 +21,7 @@ static inline int wine_nx_is_low_window( uint64_t base, uint64_t size )
 int wine_nx_low_window_reserve(void);
 int wine_nx_low_window_probe( void (*report)( const char * ) );
 int wine_nx_alias_window_probe( void (*report)( const char * ) );
+/* Keep the alias window's addresses for the rest of the process; its base, or 0. */
+uintptr_t wine_nx_alias_window_reserve(void);
 
 #endif

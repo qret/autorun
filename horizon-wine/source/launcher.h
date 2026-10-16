@@ -30,6 +30,9 @@ struct wine_nx_launcher_options
     /* The forwarder's host address-space width, or 0 if unavailable. */
     int address_space_bits;
     int low_window;
+    /* The alias window (low_window.c) has room in this 39-bit process: a game
+     * set to Window runs here, its fixed-low image moved by the base. */
+    int alias_window;
     int four_cores_available;
     int own_forwarder;
     int reboot_requested;
