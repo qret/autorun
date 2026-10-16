@@ -17,6 +17,25 @@ function(wine_nx_box64_patch content_var anchor replacement what)
     set(${content_var} "${patched}" PARENT_SCOPE)
 endfunction()
 
+# Write a generated source only when it changed, so a configure run does not
+# rebuild every copy.
+function(wine_nx_box64_write path content)
+    if(EXISTS "${path}")
+        file(READ "${path}" old)
+        if(old STREQUAL content)
+            return()
+        endif()
+    endif()
+    file(WRITE "${path}" "${content}")
+endfunction()
+
+# The alias window (source/low_window.c): a fixed-low guest address g below
+# 128 MiB lives at wine_nx_box64_window_base + g in a 39-bit process. Code is
+# fetched through this; the base is 0 while no window is in use. A function,
+# so that a fetch like addr++ is evaluated once.
+set(WINE_NX_BOX64_WINDOW_HOST
+    "#ifndef WINE_NX_WINDOW_HOST\n#include <stdint.h>\nextern uintptr_t wine_nx_box64_window_base;\nstatic inline uintptr_t wine_nx_window_host(uintptr_t a) { return a < 0x8000000 ? a + wine_nx_box64_window_base : a; }\n#define WINE_NX_WINDOW_HOST(a) wine_nx_window_host((uintptr_t)(a))\n#endif\n")
+
 function(wine_nx_add_box64_core target)
     cmake_parse_arguments(core "DYNAREC" "" "" ${ARGN})
     set(root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../vendor/box64")
@@ -40,11 +59,45 @@ function(wine_nx_add_box64_core target)
         x64runavxf30f38.c x64runavxf20f3a.c x64runavxf30f3a.c
         x64run_private.c x64primop.c x87emu_private.c x64compstrings.c
         x64shaext.c x64emu.c)
-    list(TRANSFORM sources PREPEND "${root}/src/emu/")
+    # Keep the vendored revision untouched. The interpreter is built from copies
+    # of its sources next to a modrm.h whose fetch macros reach code in the
+    # alias window; their quoted includes find that copy first.
+    set(window_dir "${CMAKE_CURRENT_BINARY_DIR}/${target}-window")
+    file(READ "${root}/src/emu/modrm.h" modrm_header)
+    foreach(fetch "(addr++)" "(addr+=2, addr-2)" "(addr+=4, addr-4)" "(addr+=8, addr-8)" "(addr+a)")
+        string(REPLACE "*)${fetch}" "*)WINE_NX_WINDOW_HOST(${fetch})" modrm_header "${modrm_header}")
+    endforeach()
+    string(FIND "${modrm_header}" "WINE_NX_WINDOW_HOST((addr++))" position)
+    if(position EQUAL -1)
+        message(FATAL_ERROR "Pinned Box64 source changed: modrm.h fetch macros")
+    endif()
+    wine_nx_box64_write("${window_dir}/emu/modrm.h" "${WINE_NX_BOX64_WINDOW_HOST}${modrm_header}")
+    set(emu_sources ${sources})
+    set(sources)
+    foreach(name ${emu_sources})
+        file(READ "${root}/src/emu/${name}" text)
+        if(name STREQUAL "x64run_private.c")
+            # Operand bytes are fetched here too, and a memory operand's address
+            # reaches the window; an LEA's address is a number and does not.
+            string(REGEX REPLACE "= \\*\\(([a-z0-9_]+)\\*\\)\\*addr;" "= *(\\1*)WINE_NX_WINDOW_HOST(*addr);" text "${text}")
+            string(REPLACE "*)((uint8_t*)(ip+a)))" "*)WINE_NX_WINDOW_HOST((uint8_t*)(ip+a)))" text "${text}")
+            string(REPLACE "(*(uint8_t*)(ip+a))" "(*(uint8_t*)WINE_NX_WINDOW_HOST(ip+a))" text "${text}")
+            string(REPLACE "(*(int8_t*)(ip+a))" "(*(int8_t*)WINE_NX_WINDOW_HOST(ip+a))" text "${text}")
+            wine_nx_box64_patch(text "    if(rex.is32bits)\n        return GetECommon_32(emu, addr, m, rex.offset);"
+                "    if(rex.is32bits)\n        return (reg64_t*)WINE_NX_WINDOW_HOST(GetECommon_32(emu, addr, m, rex.offset));"
+                "window address of a 32-bit operand")
+            wine_nx_box64_patch(text "         return (uintptr_t)&emu->regs[(m&0x07)+(rex.b<<3)];\n    } else return (uintptr_t)GetECommon(emu, addr, rex, m, delta);\n}\n\nreg64_t* GetEw16"
+                "         return (uintptr_t)&emu->regs[(m&0x07)+(rex.b<<3)];\n    } else if(rex.is32bits) return (uintptr_t)GetECommon_32(emu, addr, m, rex.offset);\n    else return (uintptr_t)GetECommon(emu, addr, rex, m, delta);\n}\n\nreg64_t* GetEw16"
+                "LEA keeps the guest address")
+            string(PREPEND text "${WINE_NX_BOX64_WINDOW_HOST}")
+        endif()
+        wine_nx_box64_write("${window_dir}/emu/${name}" "${text}")
+        list(APPEND sources "${window_dir}/emu/${name}")
+    endforeach()
     list(APPEND sources "${root}/src/tools/bitutils.c")
 
-    # Keep the vendored revision untouched. The only interpreter change is a
-    # before-fetch hook; assert its insertion point against the pinned source.
+    # The only other interpreter change is a before-fetch hook; assert its
+    # insertion point against the pinned source.
     file(READ "${root}/src/emu/x64run.c" run_source)
     set(anchor "    while(1) \n#endif\n    {")
     wine_nx_box64_patch(run_source "${anchor}"
@@ -53,8 +106,8 @@ function(wine_nx_add_box64_core target)
     wine_nx_box64_patch(run_source "#include \"modrm.h\""
         "#include \"modrm.h\"\nextern int wine_nx_box64_before_instruction(x64emu_t *, uintptr_t);"
         "interpreter hook include")
-    set(generated "${CMAKE_CURRENT_BINARY_DIR}/${target}-x64run.c")
-    file(WRITE "${generated}" "${run_source}")
+    set(generated "${window_dir}/emu/x64run.c")
+    wine_nx_box64_write("${generated}" "${run_source}")
 
     file(READ "${root}/src/emu/x64emu_private.h" emu_header)
     wine_nx_box64_patch(emu_header
@@ -124,6 +177,16 @@ function(wine_nx_add_box64_core target)
     # ARM_DYNAREC, without the x64test harness.
     set(dynarec_sources dynarec.c dynablock.c dynarec_native_functions.c dynacache_reloc.c)
     list(TRANSFORM dynarec_sources PREPEND "${root}/src/dynarec/")
+    # geted_ib, fakeed and their neighbours fetch code with macros of their own.
+    list(REMOVE_ITEM dynarec_sources "${root}/src/dynarec/dynarec_native_functions.c")
+    file(READ "${root}/src/dynarec/dynarec_native_functions.c" functions_source)
+    wine_nx_box64_patch(functions_source "#define F8      *(uint8_t*)(addr++)"
+        "#define F8      *(uint8_t*)WINE_NX_WINDOW_HOST(addr++)" "geted_ib code fetch")
+    wine_nx_box64_patch(functions_source "(((uint8_t*)ip)[A])"
+        "(((uint8_t*)WINE_NX_WINDOW_HOST(ip))[A])" "native function code peek")
+    wine_nx_box64_write("${window_dir}/dynarec/dynarec_native_functions.c"
+        "${WINE_NX_BOX64_WINDOW_HOST}${functions_source}")
+    list(APPEND dynarec_sources "${window_dir}/dynarec/dynarec_native_functions.c")
     # Count hash validations of translated blocks, reported by the runtime.
     list(REMOVE_ITEM dynarec_sources "${root}/src/dynarec/dynablock.c")
     file(READ "${root}/src/dynarec/dynablock.c" dynablock_source)
@@ -158,6 +221,10 @@ function(wine_nx_add_box64_core target)
         "refuse untranslatable pages before the translator lock")
     wine_nx_box64_patch(dynablock_source "*(uint32_t*)(db->block+db->callrets[i].offs)"
         "*(uint32_t*)DynarecMapWritableAddress(db->block+db->callrets[i].offs)" "callret site writes")
+    wine_nx_box64_patch(dynablock_source "uint32_t hash = X31_hash_code((void*)db->x64_readaddr, db->x64_size);"
+        "uint32_t hash = X31_hash_code((void*)WINE_NX_WINDOW_HOST(db->x64_readaddr), db->x64_size);"
+        "hash a block's code through the alias window")
+    string(PREPEND dynablock_source "${WINE_NX_BOX64_WINDOW_HOST}")
     set(dynablock_generated "${CMAKE_CURRENT_BINARY_DIR}/${target}-dynablock.c")
     file(WRITE "${dynablock_generated}" "${dynablock_source}")
     list(APPEND dynarec_sources "${dynablock_generated}")
@@ -185,6 +252,14 @@ function(wine_nx_add_box64_core target)
     set(arm64_sources dynarec_arm64_functions.c dynarec_arm64_arch.c arm64_immenc.c
         arm64_printer.c dynarec_arm64_jmpnext.c dynarec_arm64_consts.c)
     list(TRANSFORM arm64_sources PREPEND "${root}/src/dynarec/arm64/")
+    list(REMOVE_ITEM arm64_sources "${root}/src/dynarec/arm64/dynarec_arm64_functions.c")
+    file(READ "${root}/src/dynarec/arm64/dynarec_arm64_functions.c" arm64_functions_source)
+    wine_nx_box64_patch(arm64_functions_source "#define F8      *(uint8_t*)(addr++)\n#define F32S64  (uint64_t)(int64_t)*(int32_t*)(addr+=4, addr-4)"
+        "#define F8      *(uint8_t*)WINE_NX_WINDOW_HOST(addr++)\n#define F32S64  (uint64_t)(int64_t)*(int32_t*)WINE_NX_WINDOW_HOST((addr+=4, addr-4))"
+        "arm64 function code fetch")
+    wine_nx_box64_write("${window_dir}/dynarec/arm64/dynarec_arm64_functions.c"
+        "${WINE_NX_BOX64_WINDOW_HOST}${arm64_functions_source}")
+    list(APPEND arm64_sources "${window_dir}/dynarec/arm64/dynarec_arm64_functions.c")
     if(CMAKE_SYSTEM_NAME STREQUAL "Generic")
         # Linux signal-frame reconstruction is not a Horizon implementation.
         list(REMOVE_ITEM arm64_sources "${root}/src/dynarec/arm64/dynarec_arm64_arch.c")
@@ -218,6 +293,11 @@ function(wine_nx_add_box64_core target)
         "    while(ok) {\n        #if STEP == 0"
         "    while(ok) {\n        #if STEP == 0\n        extern int wine_nx_box64_translate_allowed(uintptr_t);\n        if(!is32bits && !wine_nx_box64_translate_allowed(addr)) {\n            need_epilog = 1;\n            break;\n        }"
         "stop AMD64 blocks before unsupported vector prefixes")
+    wine_nx_box64_patch(pass_source "|| !(*(uint32_t*)addr))) {"
+        "|| !(*(uint32_t*)WINE_NX_WINDOW_HOST(addr)))) {" "block end check through the alias window")
+    wine_nx_box64_patch(pass_source "            if(*(uint32_t*)addr!=0) {"
+        "            if(*(uint32_t*)WINE_NX_WINDOW_HOST(addr)!=0) {" "big block check through the alias window")
+    string(PREPEND pass_source "${WINE_NX_BOX64_WINDOW_HOST}")
     set(pass_generated "${CMAKE_CURRENT_BINARY_DIR}/${target}-dynarec_native_pass.c")
     file(WRITE "${pass_generated}" "${pass_source}")
     list(APPEND pass_sources "${pass_generated}")
@@ -228,6 +308,29 @@ function(wine_nx_add_box64_core target)
         "    #ifdef _WIN32\n    LDRx_U12(xR8, xEmu, offsetof(x64emu_t, win64_teb));\n    #endif"
         "    #if defined(_WIN32) || defined(WINE_NX_BOX64_X18_TLS)\n    LDRx_U12(xR8, xEmu, offsetof(x64emu_t, win64_teb));\n    #endif"
         "restore host TLS for helper calls")
+    # An operand of 32-bit code below 128 MiB lives in the alias window. The
+    # whole address is computed into a register (no displacement left for the
+    # load) and then moved by the base: xR15 (x25) holds R15, which 32-bit code has
+    # not got, and the flags, which hold the guest's, are not touched. An
+    # absolute address is moved when the block is translated. LEA asks for the
+    # number itself and sets wine_nx_box64_geted_raw.
+    wine_nx_box64_patch(helper_source
+        "    *fixaddress = 0;\n    if(hint>0) ret = hint;\n    if(hint>0 && hint<xRAX) scratch = hint;"
+        "    *fixaddress = 0;\n    if(hint>0) ret = hint;\n    if(hint>0 && hint<xRAX) scratch = hint;\n    extern unsigned int wine_nx_box64_window_shift;\n    extern int wine_nx_box64_geted_raw;\n    int window = rex.is32bits && !rex.seg && wine_nx_box64_window_shift && !wine_nx_box64_geted_raw;\n    int window_done = 0;\n    if(window) {\n        absmax = 0;\n        mask = 0;\n        unscaled = NULL;\n    }"
+        "geted: no displacement left in the alias window")
+    wine_nx_box64_patch(helper_source
+        "                    } else\n                        MOV64y(ret, tmp);\n"
+        "                    } else if(window && (uint32_t)tmp < 0x8000000) {\n                        MOV64x(ret, (uint64_t)(uint32_t)tmp + wine_nx_box64_window_base);\n                        window_done = 1;\n                    } else\n                        MOV64y(ret, tmp);\n"
+        "geted: absolute SIB address in the alias window")
+    wine_nx_box64_patch(helper_source
+        "                } else\n                    MOV32w(ret, tmp);"
+        "                } else if(window && (uint32_t)tmp < 0x8000000) {\n                    MOV64x(ret, (uint64_t)(uint32_t)tmp + wine_nx_box64_window_base);\n                    window_done = 1;\n                } else\n                    MOV32w(ret, tmp);"
+        "geted: absolute address in the alias window")
+    wine_nx_box64_patch(helper_source
+        "    *ed = ret;\n    return addr;\n}\n\n/* setup r2 to address pointed by ED"
+        "    if(window && !window_done) {\n        uint8_t dst = IS_GPR(ret) ? ((hint>0 && hint<xRAX) ? hint : x2) : ret;\n        LSRw(xR15, ret, 27);\n        SUBx_U12(xR15, xR15, 1);\n        LSRx(xR15, xR15, 63);\n        ADDx_REG_LSL(dst, ret, xR15, wine_nx_box64_window_shift);\n        ret = dst;\n    }\n    *ed = ret;\n    return addr;\n}\n\n/* setup r2 to address pointed by ED"
+        "geted: move an operand into the alias window")
+    string(PREPEND helper_source "${WINE_NX_BOX64_WINDOW_HOST}")
     set(helper_generated "${CMAKE_CURRENT_BINARY_DIR}/${target}-dynarec_arm64_helper.c")
     file(WRITE "${helper_generated}" "${helper_source}")
     list(APPEND pass_sources "${helper_generated}")
@@ -244,9 +347,51 @@ function(wine_nx_add_box64_core target)
         "${callret_depth_guard}                        STPx_S7_preindex(x4, x2, xSP, -16);" "bound CALL return pairs")
     wine_nx_box64_patch(opcodes_source "                        STPx_S7_preindex(x4, xRIP, xSP, -16);"
         "${callret_depth_guard}                        STPx_S7_preindex(x4, xRIP, xSP, -16);" "bound CALL Ed return pairs")
+    wine_nx_box64_patch(opcodes_source
+        "                addr = geted(dyn, addr, ninst, nextop, &ed, gd, &fixedaddress, NULL, 0, 0, rex, NULL, 0, 0);\n                if(gd!=ed) {    // it's sometimes used as a 3 bytes NOP"
+        "                wine_nx_box64_geted_raw = 1;\n                addr = geted(dyn, addr, ninst, nextop, &ed, gd, &fixedaddress, NULL, 0, 0, rex, NULL, 0, 0);\n                wine_nx_box64_geted_raw = 0;\n                if(gd!=ed) {    // it's sometimes used as a 3 bytes NOP"
+        "LEA keeps the guest address")
+    string(PREPEND opcodes_source "extern int wine_nx_box64_geted_raw;\n")
     set(opcodes_generated "${CMAKE_CURRENT_BINARY_DIR}/${target}-dynarec_arm64_00.c")
     file(WRITE "${opcodes_generated}" "${opcodes_source}")
     list(APPEND pass_sources "${opcodes_generated}")
+
+    # Every pass is built from a copy next to a dynarec_arm64_helper.h whose
+    # code fetch macros reach the alias window; a copy's quoted includes find
+    # it, and the vendored headers for everything else.
+    file(READ "${root}/src/dynarec/arm64/dynarec_arm64_helper.h" arm64_helper_header)
+    foreach(fetch "(addr++)" "(addr+=2, addr-2)" "(addr+=4, addr-4)" "(addr+=8, addr-8)" "(addr+a)" "(ip+a)")
+        string(REPLACE "*)${fetch}" "*)WINE_NX_WINDOW_HOST(${fetch})" arm64_helper_header "${arm64_helper_header}")
+    endforeach()
+    string(FIND "${arm64_helper_header}" "WINE_NX_WINDOW_HOST((addr++))" position)
+    if(position EQUAL -1)
+        message(FATAL_ERROR "Pinned Box64 source changed: dynarec code fetch macros")
+    endif()
+    wine_nx_box64_write("${window_dir}/dynarec/arm64/dynarec_arm64_helper.h"
+        "${WINE_NX_BOX64_WINDOW_HOST}${arm64_helper_header}")
+    file(READ "${root}/src/dynarec/dynarec_helper.h" dynarec_helper_header)
+    wine_nx_box64_write("${window_dir}/dynarec/dynarec_helper.h" "${dynarec_helper_header}")
+    set(window_passes)
+    foreach(source ${pass_sources})
+        get_filename_component(name "${source}" NAME)
+        string(REPLACE "${target}-" "" name "${name}")
+        file(READ "${source}" text)
+        if(name STREQUAL "dynarec_arm64_66.c")
+            wine_nx_box64_patch(text
+                "                addr = geted(dyn, addr, ninst, nextop, &ed, x3, &fixedaddress, NULL, 0, 0, rex, NULL, 0, 0);\n                BFIx(gd, ed, 0, 16);"
+                "                wine_nx_box64_geted_raw = 1;\n                addr = geted(dyn, addr, ninst, nextop, &ed, x3, &fixedaddress, NULL, 0, 0, rex, NULL, 0, 0);\n                wine_nx_box64_geted_raw = 0;\n                BFIx(gd, ed, 0, 16);"
+                "16-bit LEA keeps the guest address")
+            string(PREPEND text "extern int wine_nx_box64_geted_raw;\n")
+        endif()
+        if(name STREQUAL "dynarec_native_pass.c")
+            set(window_pass "${window_dir}/dynarec/${name}")
+        else()
+            set(window_pass "${window_dir}/dynarec/arm64/${name}")
+        endif()
+        wine_nx_box64_write("${window_pass}" "${text}")
+        list(APPEND window_passes "${window_pass}")
+    endforeach()
+    set(pass_sources ${window_passes})
 
     # Split code mapping. Blocks are emitted through the writable alias
     # AllocDynarecMap returns; once complete, the pointers the dynarec executes
@@ -292,6 +437,12 @@ function(wine_nx_add_box64_core target)
         "record the largest block size")
     wine_nx_box64_patch(native_source "*(uint32_t*)(block->block+block->callrets[i].offs)"
         "*(uint32_t*)DynarecMapWritableAddress(block->block+block->callrets[i].offs)" "always-dirty callret site marks")
+    wine_nx_box64_patch(native_source "uint32_t hash = X31_hash_code((void*)addr, end-addr);"
+        "uint32_t hash = X31_hash_code((void*)WINE_NX_WINDOW_HOST(addr), end-addr);" "hash code through the alias window")
+    wine_nx_box64_patch(native_source "block->hash = X31_hash_code((void*)block->x64_readaddr, block->x64_size);"
+        "block->hash = X31_hash_code((void*)WINE_NX_WINDOW_HOST(block->x64_readaddr), block->x64_size);"
+        "hash a new block through the alias window")
+    string(PREPEND native_source "${WINE_NX_BOX64_WINDOW_HOST}")
     set(native_generated "${CMAKE_CURRENT_BINARY_DIR}/${target}-dynarec_native.c")
     file(WRITE "${native_generated}" "${native_source}")
 

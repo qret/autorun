@@ -120,13 +120,38 @@ int wine_nx_box64_translate_allowed( uintptr_t address )
     return opcode != 0x62 && opcode != 0xc4 && opcode != 0xc5;
 }
 
+/* cmake/Box64Core.cmake moves operands and code fetches below 128 MiB by the
+ * base; the translator reads both while it runs, so the base stays put. */
+uintptr_t wine_nx_box64_window_base;
+unsigned int wine_nx_box64_window_shift;
+int wine_nx_box64_geted_raw;
+
+BOOL wine_nx_box64_set_window( uintptr_t base )
+{
+    unsigned int shift = 32;
+
+    if (base)
+    {
+        while (shift < 63 && (UINT64_C(1) << shift) != base) shift++;
+        if ((UINT64_C(1) << shift) != base) return FALSE;
+    }
+    wine_nx_box64_window_base = base;
+    wine_nx_box64_window_shift = base ? shift : 0;
+    return TRUE;
+}
+
+static uintptr_t window_host( uintptr_t address )
+{
+    return address < 0x8000000 ? address + wine_nx_box64_window_base : address;
+}
+
 static NTSTATUS fetch_code_byte( struct nx_engine *engine, ULONG_PTR address, unsigned char *byte )
 {
     NTSTATUS status;
 
     if ((address & ~(uintptr_t)0xfff) == engine->code_page)
     {
-        *byte = *(volatile const unsigned char *)(uintptr_t)address;
+        *byte = *(volatile const unsigned char *)window_host( address );
         return STATUS_SUCCESS;
     }
     if ((status = read_guest( engine, address, byte, 1 ))) return status;

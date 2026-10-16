@@ -635,9 +635,14 @@ unsigned int wine_nx_box64_invalidations, wine_nx_box64_marked_lookups;
 
 void wine_nx_box64_invalidate( uintptr_t addr, size_t size, int destroy )
 {
+    extern uintptr_t wine_nx_box64_window_base;
     uintptr_t end, pos;
 
     if (!size || !dynarec_ready) return;
+    /* Blocks are keyed by the guest address; a report may give its place in
+     * the alias window instead. */
+    if (wine_nx_box64_window_base && addr - wine_nx_box64_window_base < 0x8000000)
+        addr -= wine_nx_box64_window_base;
     __atomic_add_fetch( &wine_nx_box64_invalidations, 1, __ATOMIC_RELAXED );
     end = size > UINTPTR_MAX - addr ? UINTPTR_MAX : addr + size;
     size = end - addr;
@@ -1084,6 +1089,13 @@ extern void arm64_epilog(void);
 #define ARCH_NOP 0b11010101000000110010000000011111
 #define ARCH_UDF 0xcafe
 
+/* A block's guest code below 128 MiB is read in the alias window. */
+static void *window_code( void *addr )
+{
+    extern uintptr_t wine_nx_box64_window_base;
+    return (uintptr_t)addr < 0x8000000 ? (char *)addr + wine_nx_box64_window_base : addr;
+}
+
 static int guest_code_readable( void *addr, uintptr_t size )
 {
 #ifdef __SWITCH__
@@ -1127,8 +1139,8 @@ int wine_nx_box64_callret_trap( uintptr_t *pc )
         site = (uintptr_t)db->block + db->callrets[i].offs == *pc && !db->callrets[i].type;
     if (!site) return 0;
 
-    if (!db->gone && guest_code_readable( db->x64_addr, db->x64_size ) &&
-        X31_hash_code( db->x64_addr, (int)db->x64_size ) == db->hash)
+    if (!db->gone && guest_code_readable( window_code( db->x64_addr ), db->x64_size ) &&
+        X31_hash_code( window_code( db->x64_addr ), (int)db->x64_size ) == db->hash)
     {
         if (db->always_test) protectDB( (uintptr_t)db->x64_addr, 1 );
         else

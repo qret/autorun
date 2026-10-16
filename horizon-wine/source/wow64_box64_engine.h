@@ -34,4 +34,11 @@ BOOL wine_nx_box64_handle_fault( ULONG_PTR address, ULONG access, ULONG_PTR pc,
 /* What the last STATUS_ACCESS_VIOLATION of this thread's run was about: the
  * address, and 0 read, 1 write or 8 execute. */
 void wine_nx_box64_last_fault( ULONG *address, ULONG *access );
+
+/* The alias window: guest addresses below 128 MiB live at base + address, and
+ * translated 32-bit code reaches them there. base is a power of two of at
+ * least 4 GiB, so a pointer cut to 32 bits is the guest address again, or 0
+ * for no window. Set it before the first 32-bit code runs; blocks translated
+ * before it do not move their operands. Returns FALSE for any other base. */
+BOOL wine_nx_box64_set_window( uintptr_t base );
 #endif
