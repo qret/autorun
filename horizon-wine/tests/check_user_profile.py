@@ -12,7 +12,7 @@ handed itself back to its launcher.
 
 So: the runtime's profile must be named after GetUserName, its environment must
 agree with it, the per-user folders shell32 precreates must be made, and the
-settings the packager stages must sit inside that profile."""
+settings the runtime writes for a game must sit inside that profile."""
 from pathlib import Path
 import re
 import sys
@@ -21,7 +21,7 @@ root = Path(__file__).resolve().parents[2]
 runtime = (root / 'horizon-wine/source/runtime.c').read_text()
 advapi = (root / 'dlls/advapi32/advapi.c').read_text()
 shellpath = (root / 'dlls/shell32/shellpath.c').read_text()
-packager = (root / 'horizon-wine/tools/package-autorun.py').read_text()
+falloutnv = (root / 'horizon-wine/source/games/falloutnv.h').read_text()
 failures = []
 
 
@@ -75,16 +75,17 @@ for folder in ('AppData/Local', 'AppData/Roaming', 'Desktop', 'Documents',
                'Downloads', 'Music', 'Pictures', 'Saved Games', 'Videos'):
     check(folder in made, f'the runtime does not create {folder} in the profile')
 
-# The settings the packager ships are inside that profile.
-staged = re.search(r"stage / 'drive_c/users/([^/]*)/Documents/My Games/FalloutNV'", packager)
-check(staged is not None, 'the packager no longer stages FalloutPrefs.ini under Documents')
+# The settings the runtime writes for Fallout: New Vegas (games/falloutnv.h)
+# are inside that profile.
+staged = re.search(r'\.path = "drive_c/users/([^/]*)/Documents/My Games/FalloutNV/FalloutPrefs\.ini"', falloutnv)
+check(staged is not None, 'Fallout: New Vegas settings are no longer written under Documents')
 if staged and user_name:
     check(staged.group(1) == user_name,
-          f'FalloutPrefs.ini is staged under /users/{staged.group(1)}, which the game does not read')
+          f'FalloutPrefs.ini is written under /users/{staged.group(1)}, which the game does not read')
 
 if failures:
     for failure in failures:
         print('FAIL:', failure)
     sys.exit(1)
 print(f'User profile: /users/{user_name} matches GetUserName, the environment, '
-      f'the {len(made)} folders shell32 precreates and the staged game settings')
+      f'the {len(made)} folders shell32 precreates and the game settings written there')
