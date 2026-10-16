@@ -191,6 +191,10 @@ for name in ['horizon_backing', 'horizon_mapping']:
 a = s.index('static struct horizon_backing backing_slots[')
 b = s.index('void horizon_memory_pool_stats(', a)
 fixture += s[a:b]
+fixture += block(r'^struct horizon_file_source\n\{.*?^\};')
+for name in ['static struct horizon_file_source *file_source_ref(', 'static void file_source_release(',
+             'static void inherit_file_source(', 'static void free_mapping(']:
+    fixture += function(name)
 fixture += function('static int compare_mapping(')
 fixture += block(r'^static struct rb_tree mappings = .*?;')
 fixture += r'''

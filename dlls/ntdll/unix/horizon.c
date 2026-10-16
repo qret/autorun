@@ -20429,6 +20429,55 @@ static int add_lazy_file_mapping_locked( void *start, size_t size, int prot, int
     return 0;
 }
 
+static int add_lazy_file_mapping( void *start, size_t size, int prot, int fd, off_t offset )
+{
+    int ret;
+
+    virtmemLock();
+    ret = add_lazy_file_mapping_locked( start, size, prot, fd, offset );
+    virtmemUnlock();
+    return ret;
+}
+
+/* The parts of a buffer the program hands to a write that lie in views read on
+ * demand, touched before the write takes a lock or passes the buffer to a
+ * Horizon service. Such a view comes in on its first touch, and that reads the
+ * card through the SD cache: touched under the cache's own lock, as a buffered
+ * write copies it, the read waits for that lock forever; passed to the FS or
+ * socket service, which does not fault, the write fails. Only those parts: the
+ * rest of a bad buffer is the write's to refuse. Found under mapping_mutex and
+ * touched after it, since the fault takes it. */
+void horizon_touch_buffer( const void *buffer, size_t size )
+{
+    struct { const volatile char *start, *end; } ranges[8];
+    char *cursor = (char *)buffer, *end = cursor + size;
+    struct horizon_mapping *mapping;
+    unsigned int count = 0, i;
+
+    if (!wine_nx_lazy_file_views || !buffer || !size || end < cursor) return;
+    pthread_mutex_lock( &mapping_mutex );
+    while (cursor < end && count < ARRAY_SIZE(ranges) && (mapping = find_overlap_mapping( cursor, end - cursor )))
+    {
+        char *mapping_end = (char *)mapping->addr + mapping->size;
+
+        if (mapping->file && mapping->reservation)
+        {
+            ranges[count].start = max( cursor, (char *)mapping->addr );
+            ranges[count].end = min( end, mapping_end );
+            count++;
+        }
+        cursor = mapping_end;
+    }
+    pthread_mutex_unlock( &mapping_mutex );
+    for (i = 0; i < count; i++)
+    {
+        const volatile char *byte;
+
+        for (byte = ranges[i].start; byte < ranges[i].end; byte += 0x1000) (void)*byte;
+        (void)ranges[i].end[-1];
+    }
+}
+
 #ifdef WINE_NX_SWAP_POC
 static int swap_resident_locked( const void *addr, size_t size )
 {
@@ -20698,16 +20747,10 @@ static void *horizon_mmap_fixed( void *start, size_t size, int prot, int flags, 
         virtmemUnlock();
         if (ret) start = MAP_FAILED;
     }
-    else if (horizon_lazy_file_view_wanted( fd, size, prot ))
-    {
-        int ret;
-
+    /* A view that cannot be read on demand -- the file could not be kept open,
+     * say -- is read whole, as every view is without the option. */
+    else if (horizon_lazy_file_view_wanted( fd, size, prot ) && !add_lazy_file_mapping( start, size, prot, fd, offset ))
         stage = "reserve file view read on demand";
-        virtmemLock();
-        ret = add_lazy_file_mapping_locked( start, size, prot, fd, offset );
-        virtmemUnlock();
-        if (ret) start = MAP_FAILED;
-    }
     else
     {
         stage = "map backing";

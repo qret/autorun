@@ -54,6 +54,9 @@ for name in ['horizon_backing', 'horizon_mapping']:
 a = s.index('static struct horizon_backing backing_slots[')
 b = s.index('void horizon_memory_pool_stats(', a)
 fixture += s[a:b]
+fixture += re.search(r'^struct horizon_file_source\n\{.*?^\};', s, re.M | re.S).group(0) + '\n'
+for name in ['static void file_source_release(', 'static void free_mapping(']:
+    fixture += function(name)
 fixture += function('static int compare_mapping(')
 fixture += re.search(r'^static struct rb_tree mappings = .*?;', s, re.M).group(0) + '\n'
 for name in ['static void list_add_mapping(', 'static void list_remove_mapping(',

@@ -20,6 +20,7 @@ def function(marker):
 
 
 fixture = r'''
+#include <unistd.h>
 #include <assert.h>
 #include <errno.h>
 #include <stdint.h>
@@ -46,7 +47,9 @@ typedef struct { u64 addr, size; u32 type, perm, attr; } MemoryInfo;
 #define MemType_Unmapped 0
 #define R_SUCCEEDED(result) ((result) == 0)
 typedef struct { uintptr_t start, end; int used; } VirtmemReservation;
-struct horizon_mapping { void *addr; size_t size; int prot; void *backing; VirtmemReservation *reservation; };
+struct horizon_file_source { int fd; unsigned int refs; };
+struct horizon_mapping { void *addr; size_t size; int prot; void *backing; VirtmemReservation *reservation;
+                         struct horizon_file_source *file; off_t file_offset; };
 static VirtmemReservation reservations[32];
 static struct horizon_mapping *maps[8];
 static int map_count, mapping_pool, allocations, fail_allocation, fail_reservation;
@@ -96,7 +99,7 @@ static struct horizon_mapping *alloc_mapping(void *p, size_t size, void *backing
     if (fail_allocation && !--fail_allocation) return NULL;
     struct horizon_mapping *m = malloc(sizeof(*m));
     assert(m); allocations++;
-    *m = (struct horizon_mapping){p,size,prot,backing,r};
+    *m = (struct horizon_mapping){p,size,prot,backing,r,NULL,0};
     return m;
 }
 static void horizon_object_free(void *pool, struct horizon_mapping *m)
@@ -108,6 +111,9 @@ static void list_remove_mapping(struct horizon_mapping *m)
     abort();
 }
 '''
+for name in ['static struct horizon_file_source *file_source_ref(', 'static void file_source_release(',
+             'static void inherit_file_source(', 'static void free_mapping(']:
+    fixture += function(name)
 fixture += 'static int map_backing_at(void *, size_t, int, int, off_t, int, int);\n'
 fixture += function('static int replace_reservation_mapping(')
 fixture += function('static int change_reservation_mapping(')
@@ -146,6 +152,13 @@ static int map_anonymous_backings(void *p, size_t size, int prot, int flags, int
 #define HORIZON_LAZY_MAPPING_MIN ((size_t)256 * 1024 * 1024)
 #define HORIZON_LAZY_MAPPING_CHUNK HORIZON_POOL_ARENA
 static void wine_nx_runtime_trace(const char *msg) { puts(msg); }
+/* Views of files read on demand are check_lazy_file_views.py's. */
+#define HORIZON_LAZY_FILE_VIEW_CHUNK ((size_t)512 * 1024)
+static unsigned int horizon_lazy_file_chunks;
+static BOOL horizon_lazy_file_view_wanted(int fd, size_t size, int prot)
+{ (void)fd; (void)size; (void)prot; return FALSE; }
+static int add_lazy_file_mapping(void *p, size_t size, int prot, int fd, off_t offset)
+{ (void)p; (void)size; (void)prot; (void)fd; (void)offset; abort(); }
 '''
 fixture += function('static int add_lazy_mapping_locked(')
 fixture += function('static BOOL horizon_commit_lazy_fault(')

@@ -6475,6 +6475,8 @@ static unsigned int set_pending_write( HANDLE device )
 /* Completed reads and their time inside NtReadFile, reported by the runtime's
  * [PROGRESS] line. */
 extern unsigned long long horizon_interrupt_time(void);
+/* Pages of a view read on demand, brought in before a write passes them on (horizon.c). */
+extern void horizon_touch_buffer( const void *buffer, size_t size );
 unsigned int wine_nx_file_reads;
 unsigned long long wine_nx_file_read_100ns;
 unsigned long long wine_nx_file_read_bytes;
@@ -6851,6 +6853,9 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
            handle, event, apc, apc_user, io, buffer, length, offset, key );
 
     if (!io) return STATUS_ACCESS_VIOLATION;
+#ifdef __SWITCH__
+    horizon_touch_buffer( buffer, length );
+#endif
 
     status = server_get_unix_fd( handle, FILE_WRITE_DATA, &unix_handle, &needs_close, &type, &options );
     if (status == STATUS_ACCESS_DENIED)

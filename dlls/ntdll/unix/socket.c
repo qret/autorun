@@ -49,6 +49,8 @@
 /* The family the program opened a socket with (horizon.c): Horizon's sockets
  * are all IPv4, and an AF_INET6 one is IPv4 underneath. */
 extern unsigned int horizon_server_sock_family( unsigned int handle );
+/* Pages of a view read on demand, brought in before a send passes them on (horizon.c). */
+extern void horizon_touch_buffer( const void *buffer, size_t size );
 #endif
 
 #ifdef HAVE_NETIPX_IPX_H
@@ -1231,6 +1233,11 @@ static NTSTATUS sock_send( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, voi
     BOOL nonblocking;
     unsigned int status;
     ULONG options;
+
+#ifdef __SWITCH__
+    for (unsigned int i = 0; i < async->count; i++)
+        horizon_touch_buffer( async->iov[i].iov_base, async->iov[i].iov_len );
+#endif
 
     SERVER_START_REQ( send_socket )
     {

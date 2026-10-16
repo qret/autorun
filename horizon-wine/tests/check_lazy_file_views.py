@@ -38,7 +38,27 @@ assert 'mapping->file ? HORIZON_LAZY_FILE_VIEW_CHUNK : HORIZON_LAZY_MAPPING_CHUN
 # Only MAP_FIXED views are made this way, which is how Wine maps files.
 fixed = source[source.index('static void *horizon_mmap_fixed'):]
 fixed = fixed[:fixed.index('\nvoid *horizon_anon_mmap_fixed')]
-assert 'add_lazy_file_mapping_locked( start, size, prot, fd, offset )' in fixed
+assert 'horizon_lazy_file_view_wanted( fd, size, prot ) && !add_lazy_file_mapping( start, size, prot, fd, offset )' in fixed
+# A view that cannot be read on demand is read whole: the branch falls through
+# to the ordinary one rather than failing the view.
+lazy_branch = fixed[fixed.index('horizon_lazy_file_view_wanted( fd, size, prot )'):]
+assert lazy_branch.index('stage = "reserve file view read on demand";') < lazy_branch.index('stage = "map backing";')
+assert 'MAP_FAILED' not in lazy_branch[:lazy_branch.index('stage = "map backing";')]
+
+# A write's buffer is brought in before the write locks the SD cache or hands
+# it to a service: only the parts in views read on demand, found under
+# mapping_mutex and touched after it, since the fault takes that lock.
+touch = source[source.index('void horizon_touch_buffer('):]
+touch = touch[:touch.index('\n}\n')]
+assert 'if (!wine_nx_lazy_file_views' in touch
+assert 'mapping->file && mapping->reservation' in touch
+assert touch.index('pthread_mutex_unlock( &mapping_mutex );') < touch.index('(void)*byte;')
+file_c = (root / 'dlls/ntdll/unix/file.c').read_text()
+write = file_c[file_c.index('NTSTATUS WINAPI NtWriteFile('):]
+assert write.index('horizon_touch_buffer( buffer, length );') < write.index('server_get_unix_fd(')
+socket_c = (root / 'dlls/ntdll/unix/socket.c').read_text()
+send = socket_c[socket_c.index('static NTSTATUS sock_send('):]
+assert send.index('horizon_touch_buffer( async->iov[i].iov_base, async->iov[i].iov_len );') < send.index('SERVER_START_REQ( send_socket )')
 
 # The runtime turns it on per program, and says so.
 assert 'wine_nx_lazy_file_views = settings.lazy_file_views;' in runtime
