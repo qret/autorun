@@ -502,6 +502,8 @@ struct horizon_fd_queue
 #define HORIZON_REQ_OPEN_SEMAPHORE 43
 #define HORIZON_REQ_CREATE_FILE 44
 #define HORIZON_REQ_OPEN_FILE_OBJECT 45
+#define HORIZON_REQ_LOCK_FILE 53
+#define HORIZON_REQ_UNLOCK_FILE 54
 #define HORIZON_REQ_GET_HANDLE_UNIX_NAME 47
 #define HORIZON_REQ_GET_HANDLE_FD 48
 #define HORIZON_REQ_RECV_SOCKET 55
@@ -647,6 +649,9 @@ struct horizon_fd_queue
 #define HORIZON_STATUS_USER_APC 0x000000c0u
 #define HORIZON_STATUS_TIMEOUT 0x00000102u
 #define HORIZON_STATUS_PENDING 0x00000103u
+#define HORIZON_STATUS_FILE_LOCK_CONFLICT 0xc0000054u
+#define HORIZON_STATUS_NOT_LOCKED 0xc000002au
+#define HORIZON_STATUS_INVALID_DEVICE_REQUEST 0xc0000010u
 #define HORIZON_STATUS_UNSUCCESSFUL 0xc0000001u
 #define HORIZON_STATUS_BUFFER_OVERFLOW 0x80000005u
 #define HORIZON_STATUS_BUFFER_TOO_SMALL 0xc0000023u
@@ -1383,6 +1388,31 @@ struct horizon_set_fd_eof_info_request
     struct horizon_server_request_header header;
     unsigned int handle;
     unsigned long long eof;
+};
+
+struct horizon_lock_file_request
+{
+    struct horizon_server_request_header header;
+    unsigned int handle;
+    unsigned long long offset;
+    unsigned long long count;
+    int shared;
+    int wait;
+};
+
+struct horizon_lock_file_reply
+{
+    struct horizon_server_reply_header header;
+    unsigned int handle;
+    int overlapped;
+};
+
+struct horizon_unlock_file_request
+{
+    struct horizon_server_request_header header;
+    unsigned int handle;
+    unsigned long long offset;
+    unsigned long long count;
 };
 
 struct horizon_get_handle_unix_name_request
@@ -4860,9 +4890,125 @@ static void horizon_server_unlink_timer_locked( struct horizon_server_object *ti
 }
 
 /* Callers hold horizon_server_objects_mutex. */
+/* Byte-range locks, server/fd.c's: held by a file object, on the file its
+ * path names, and gone with the object. Autorun runs one process, so they
+ * only have to hold between the program's own handles. Under
+ * horizon_server_objects_mutex. */
+struct horizon_file_lock
+{
+    struct horizon_file_lock *next;
+    struct horizon_server_object *owner;
+    unsigned long long start, end;  /* end 0: to the end of every file */
+    int shared;
+};
+static struct horizon_file_lock *horizon_file_locks;
+
+static int horizon_file_locks_overlap( const struct horizon_file_lock *lock,
+                                       unsigned long long start, unsigned long long end )
+{
+    if (lock->end && start >= lock->end) return 0;
+    if (end && lock->start >= end) return 0;
+    return 1;
+}
+
+static int horizon_file_lock_same_file( const struct horizon_server_object *a, const struct horizon_server_object *b )
+{
+    return a == b || (a->file_name && b->file_name && !strcasecmp( a->file_name, b->file_name ));
+}
+
+static void horizon_file_locks_release_locked( struct horizon_server_object *owner )
+{
+    struct horizon_file_lock **ptr = &horizon_file_locks, *lock;
+
+    while ((lock = *ptr))
+    {
+        if (lock->owner != owner) { ptr = &lock->next; continue; }
+        *ptr = lock->next;
+        free( lock );
+    }
+}
+
+static int horizon_server_handle_lock_file( struct horizon_server_connection *connection,
+                                            const unsigned char *message )
+{
+    const struct horizon_lock_file_request *request = (const void *)message;
+    unsigned long long start = request->offset, end = request->offset + request->count;
+    struct horizon_lock_file_reply reply = {0};
+    struct horizon_server_handle_entry *entry;
+    struct horizon_file_lock *lock;
+    struct horizon_server_object *object;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    entry = horizon_server_find_handle_locked( request->handle );
+    if (!entry) reply.header.error = HORIZON_STATUS_INVALID_HANDLE;
+    else if (entry->object->type != HORIZON_SERVER_OBJECT_FILE) reply.header.error = HORIZON_STATUS_OBJECT_TYPE_MISMATCH;
+    else if (entry->object->file_is_dir || !entry->object->file_name)
+        reply.header.error = HORIZON_STATUS_INVALID_DEVICE_REQUEST;  /* not a regular file */
+    else if (end && end < start) reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
+    else
+    {
+        object = entry->object;
+        for (lock = horizon_file_locks; lock; lock = lock->next)
+        {
+            if (!horizon_file_lock_same_file( lock->owner, object ) ||
+                !horizon_file_locks_overlap( lock, start, end )) continue;
+            if (request->shared && (lock->shared || lock->owner == object)) continue;
+            /* No object to wait on: STATUS_PENDING with no handle has the
+             * client sleep and ask again, as for a Unix lock conflict. */
+            reply.header.error = request->wait ? HORIZON_STATUS_PENDING : HORIZON_STATUS_FILE_LOCK_CONFLICT;
+            break;
+        }
+        if (!lock)
+        {
+            if (!(lock = calloc( 1, sizeof(*lock) ))) reply.header.error = HORIZON_STATUS_NO_MEMORY;
+            else
+            {
+                lock->owner = object;
+                lock->start = start;
+                lock->end = end;
+                lock->shared = request->shared;
+                lock->next = horizon_file_locks;
+                horizon_file_locks = lock;
+            }
+        }
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+static int horizon_server_handle_unlock_file( struct horizon_server_connection *connection,
+                                              const unsigned char *message )
+{
+    const struct horizon_unlock_file_request *request = (const void *)message;
+    unsigned long long start = request->offset, end = request->offset + request->count;
+    struct horizon_server_handle_entry *entry;
+    struct horizon_file_lock **ptr, *lock;
+    unsigned int status = HORIZON_STATUS_NOT_LOCKED;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    entry = horizon_server_find_handle_locked( request->handle );
+    if (!entry) status = HORIZON_STATUS_INVALID_HANDLE;
+    else if (entry->object->type != HORIZON_SERVER_OBJECT_FILE) status = HORIZON_STATUS_OBJECT_TYPE_MISMATCH;
+    else
+    {
+        /* the exact range this object locked */
+        for (ptr = &horizon_file_locks; (lock = *ptr); ptr = &lock->next)
+        {
+            if (lock->owner != entry->object || lock->start != start || lock->end != end) continue;
+            *ptr = lock->next;
+            free( lock );
+            status = HORIZON_STATUS_SUCCESS;
+            break;
+        }
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_write_status( connection->reply_fd, status );
+}
+
 static void horizon_server_free_object( struct horizon_server_object *object )
 {
     if (!object) return;
+    if (object->type == HORIZON_SERVER_OBJECT_FILE) horizon_file_locks_release_locked( object );
     if (object->type == HORIZON_SERVER_OBJECT_TIMER) horizon_server_unlink_timer_locked( object );
     if (object->type == HORIZON_SERVER_OBJECT_THREAD)
     {
@@ -16808,6 +16954,12 @@ static void *horizon_server_thread( void *param )
         case HORIZON_REQ_SET_FD_EOF_INFO:
             status = horizon_server_handle_set_fd_eof_info( connection, message );
             break;
+        case HORIZON_REQ_LOCK_FILE:
+            status = horizon_server_handle_lock_file( connection, message );
+            break;
+        case HORIZON_REQ_UNLOCK_FILE:
+            status = horizon_server_handle_unlock_file( connection, message );
+            break;
         case HORIZON_REQ_SET_FD_DISP_INFO:
             status = horizon_server_handle_set_fd_disp_info( connection, message );
             break;
@@ -17352,6 +17504,37 @@ static BOOL horizon_transient_page_fault( ThreadExceptionDump *ctx )
 
 __thread int horizon_suspend_pending;
 
+#if defined(__aarch64__)
+/* A fault whose handling faults again ends only when the stack does, and by
+ * then the first of them, the one that says what went wrong, is long gone.
+ * The first few faults of a burst handed to the program are traced, and then
+ * every time their number doubles. Misalignments are counted apart: FEX takes
+ * one for every unaligned access it has yet to patch, by the hundred, and
+ * would hide the access violation among them. */
+static void horizon_trace_program_fault( const ThreadExceptionDump *ctx, const EXCEPTION_RECORD *rec, TEB *teb )
+{
+    static unsigned long long last_ms[2];
+    static unsigned int burst[2];
+    unsigned long long now = armTicksToNs( armGetSystemTick() ) / 1000000ull;
+    unsigned int count, kind = rec->ExceptionCode == STATUS_DATATYPE_MISALIGNMENT;
+    char buf[320];
+
+    if (now - __atomic_exchange_n( &last_ms[kind], now, __ATOMIC_RELAXED ) > 500)
+        __atomic_store_n( &burst[kind], 0, __ATOMIC_RELAXED );
+    count = __atomic_add_fetch( &burst[kind], 1, __ATOMIC_RELAXED );
+    if (count > (kind ? 2 : 8) && (count & (count - 1))) return;
+    snprintf( buf, sizeof(buf),
+              "[EXC] fault %u to the program: tid=%04x code=0x%08x %s 0x%llx pc=0x%llx sp=0x%llx lr=0x%llx fp=0x%llx",
+              count, (unsigned)HandleToULong( teb->ClientId.UniqueThread ), (unsigned)rec->ExceptionCode,
+              rec->NumberParameters < 2 ? "at" :
+              rec->ExceptionInformation[0] == EXCEPTION_EXECUTE_FAULT ? "executing" :
+              rec->ExceptionInformation[0] == EXCEPTION_WRITE_FAULT ? "writing" : "reading",
+              (unsigned long long)ctx->far.x, (unsigned long long)ctx->pc.x, (unsigned long long)ctx->sp.x,
+              (unsigned long long)ctx->lr.x, (unsigned long long)ctx->fp.x );
+    wine_nx_runtime_trace( buf );
+}
+#endif
+
 #ifdef WINE_NX_SWAP_POC
 extern int wine_nx_swap_fault( uint64_t address, uint32_t esr ) __attribute__((weak));
 static BOOL horizon_swap_fault( unsigned long long address, unsigned int esr );
@@ -17462,6 +17645,7 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
             horizon_resume_exception( ctx );
         }
         rec.ExceptionCode = status;
+        horizon_trace_program_fault( ctx, &rec, data->teb );
         horizon_exception_context( ctx, &context );
         status = call_user_exception_dispatcher( data, &rec, &context );
         snprintf( buf, sizeof(buf),
