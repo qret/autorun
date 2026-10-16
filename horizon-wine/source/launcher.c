@@ -1757,7 +1757,7 @@ enum program_row
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES,
-    ROW_ADDRESS,
+    ROW_LAZY_FILE_VIEWS, ROW_ADDRESS,
     ROW_HIDE, ROW_LIBRARY, PROGRAM_ROWS
 };
 
@@ -2535,6 +2535,13 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
         row->on = p->settings.four_cores;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.four_cores ? "Enabled" : "Disabled" );
 
+        ADD_ROW( ROW_LAZY_FILE_VIEWS, SECTION_EMULATION, "Fast file loading",
+                 "Reads only the parts of the game's files it uses. Faster loading for games with large "
+                 "data files; turn it off if the game misbehaves." );
+        row->kind = UI_ROW_SWITCH;
+        row->on = p->settings.lazy_file_views;
+        snprintf( row->value, sizeof(row->value), "%s", p->settings.lazy_file_views ? "Enabled" : "Disabled" );
+
         {
             enum launcher_address_space needs = launcher_program_address_space( p->path );
 
@@ -2955,6 +2962,11 @@ static int program_menu_run( struct launcher *l, struct program *p, char *target
             if (action == UI_ACTION_RESET) p->settings.four_cores = 1;
             else if (p->settings.four_cores) p->settings.four_cores = 0;
             else if (l->options->four_cores_available) p->settings.four_cores = 1;
+            save_program_settings( l, p );
+            break;
+
+        case ROW_LAZY_FILE_VIEWS:
+            p->settings.lazy_file_views = action == UI_ACTION_RESET ? 0 : !p->settings.lazy_file_views;
             save_program_settings( l, p );
             break;
 

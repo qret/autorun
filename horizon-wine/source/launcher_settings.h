@@ -191,6 +191,7 @@ struct launcher_settings
      * from the program's own header, 0 any, 1 the low 4 GB of Autorun 32-bit, 2 the
      * low addresses through the alias window of the 39-bit process (Box64 only). */
     int address_space;
+    int lazy_file_views;  /* views of files read from the card on demand */
     int framebuffer;  /* 1: windows go to the framebuffer, 0: through the compositor */
     enum launcher_d3d_renderer d3d;
     enum dxvk_source dxvk_source;
@@ -415,6 +416,7 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
         /* Window was a choice of its own until Auto took the window for
          * fixed-low games; a game set to it is now Auto. */
     }
+    settings->lazy_file_views = launcher_setting_state( kv, "lazy-file-views" ) == 1;
     settings->framebuffer = -1;
     if (launcher_kv_get( kv, "windows", value, sizeof(value) ))
     {
@@ -501,6 +503,7 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "four-cores", settings->four_cores ? NULL : "0" ) &&
            launcher_kv_set( kv, "address-space", settings->address_space < 0 ? NULL :
                                                  settings->address_space ? "32-bit" : "any" ) &&
+           launcher_kv_set( kv, "lazy-file-views", settings->lazy_file_views ? "1" : NULL ) &&
            launcher_kv_set( kv, "windows", settings->framebuffer < 0 ? NULL :
                                            settings->framebuffer ? "framebuffer" : "compositor" ) &&
            launcher_kv_set( kv, "d3d9", NULL ) &&
