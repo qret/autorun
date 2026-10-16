@@ -98,13 +98,13 @@ static void test_settings( const char *dir )
     load_text( &kv, "address-space=bogus\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.address_space == -1 );
-    /* Window: the alias window of the 39-bit process, written and read back. */
+    /* Window is no choice any more: Auto takes the window itself, so a game
+     * still set to it reads as Auto and loses the key when saved. */
     load_text( &kv, "address-space=window\n" );
     launcher_settings_read( &kv, &settings );
-    assert( settings.address_space == 2 && launcher_settings_write( &kv, &settings ) );
-    launcher_settings_read( &kv, &back );
-    assert( back.address_space == 2 && strstr( kv.text, "address-space=window" ) );
-    settings.address_space = 3;
+    assert( settings.address_space == -1 && launcher_settings_write( &kv, &settings ) );
+    assert( !strstr( kv.text, "address-space=" ) );
+    settings.address_space = 2;
     assert( !launcher_settings_write( &kv, &settings ) );
     settings.address_space = -1;
     load_text( &kv, "cpu=box64\n" );

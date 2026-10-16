@@ -33,13 +33,24 @@ def card(path):
     return stage / path if (stage / path).exists() else dlls / path
 
 assert (dlls / "horizon-dlls/manifest.json").is_file(), f"{dlls} is not the DLL repository's card tree"
-# The Windows modules are the DLL repository's; the package brings none of its own.
+# The Windows modules are the DLL repository's; the package brings none of its
+# own but its WoW64 FEX for games in the alias window, under a name of its own.
+fex_window = "libwow64fex-window.dll"
 for folder in ("drive_c/windows/system32", "drive_c/windows/syswow64", "drive_c/dxvk", "drive_c/dxvk64",
                "drive_c/vkd3d64"):
     if (stage / folder).is_dir():
         own = [p.name for p in (stage / folder).iterdir()
-               if p.suffix.lower() in (".dll", ".drv", ".acm", ".ax", ".ocx", ".sys", ".cpl", ".tlb")]
+               if p.suffix.lower() in (".dll", ".drv", ".acm", ".ax", ".ocx", ".sys", ".cpl", ".tlb")
+               and not (folder == "drive_c/windows/system32" and p.name == fex_window)]
         assert not own, f"{folder} in the package holds modules the DLL repository provides: {own[:8]}"
+own_fex = stage / "drive_c/windows/system32" / fex_window
+if own_fex.exists():
+    assert not (dlls / "drive_c/windows/system32" / fex_window).exists(), f"the DLL repository has a {fex_window} too"
+    fex_exports = inspect(own_fex, "--coff-exports")
+    for name in ("BTCpuProcessInit", "BTCpuSimulate", "BTCpuResetToConsistentState"):
+        assert f"Name: {name}\n" in fex_exports, f"{fex_window} lacks {name}"
+    assert b"WINE_NX_FEX_WINDOW_SHIFT" in own_fex.read_bytes(), f"{fex_window} is not the alias window build"
+    assert (stage / "licenses/FEX-MIT.txt").is_file(), "FEX's license is not beside its module"
 
 wow64 = card("drive_c/windows/system32/wow64.dll")
 assert "Name: __wine_switch_cpu_dll" in inspect(wow64, "--coff-exports"), "Missing Switch CPU selection export"
@@ -97,4 +108,5 @@ for gone in ("run-entry.txt", "verbose.txt", "profile.txt", "framebuffer.txt", "
 assert (stage / "share/wine/nls/locale.nls").exists()
 for folder in ("drive_c/windows/fonts", "share/wine/fonts"):
     assert list((stage / folder).glob("*.ttf")), folder
-print("Autorun package: no modules of its own, setups and CPU exports against the DLL repository, NRO and settings passed")
+print("Autorun package: no modules of its own but the alias window FEX, setups and CPU exports against the DLL "
+      "repository, NRO and settings passed")

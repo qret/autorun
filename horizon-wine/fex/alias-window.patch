@@ -338,3 +338,34 @@ index 0000000..4a8d08e
 +  return fextl::make_unique<AliasWindow>(Shift);
 +}
 +} // namespace FEXCore::IR
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index 05e14a0..8a53c5d 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -9,6 +9,10 @@ $end_info$
+ // Thanks to André Zwing, whose ideas from https://github.com/AndreRH/hangover this code is based upon
+ 
+ #include <FEXCore/fextl/fmt.h>
++#if __has_include("alias_window.h")
++#include "alias_window.h"
++#define FEX_HORIZON_ALIAS_WINDOW 1
++#endif
+ #include <FEXCore/Core/X86Enums.h>
+ #include <FEXCore/Core/SignalDelegator.h>
+ #include <FEXCore/Core/Context.h>
+@@ -910,6 +914,15 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
+     Thread && Thread->ThreadStats ? &Thread->ThreadStats->AccumulatedSignalTime : nullptr);
+ 
+   if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
++#ifdef FEX_HORIZON_ALIAS_WINDOW
++    // A game in Autorun's alias window faults at the window's base + its own
++    // address; everything below -- code tracking, the guest's exception -- wants
++    // the address the game knows. Nothing else is mapped in the window.
++    if (const auto Base = WineNX::FEX::AliasWindowBase();
++        Base && Exception->ExceptionInformation[1] >= Base && Exception->ExceptionInformation[1] < Base + 0x8000000) {
++      Exception->ExceptionInformation[1] -= Base;
++    }
++#endif
+     const auto FaultAddress = static_cast<uint64_t>(Exception->ExceptionInformation[1]);
+ 
+     if (Thread && FEX::Windows::CallRetStack::HandleAccessViolation(Thread, FaultAddress, Context->X25)) {

@@ -1985,15 +1985,14 @@ static int program_needs_low( struct program *p )
     return launcher_program_address_space( p->path ) == LAUNCHER_ADDRESS_LOW;
 }
 
-/* Set to Window, or Auto with a fixed-low header, and this 39-bit process has
- * room for the alias window: the game runs here, through Box64, its image moved
- * by the window's base. Autorun 32-bit is left for when there is no window. */
+/* Auto with a fixed-low header, and this 39-bit process has room for the alias
+ * window: the game runs here, its image moved by the window's base, through Box64
+ * or our FEX build (runtime.c, runtime_fex_window). Autorun 32-bit is left for
+ * when there is no window. */
 static int program_runs_in_window( struct launcher *l, struct program *p )
 {
-    int wants = p->settings.address_space == 2 ||
-                (p->settings.address_space < 0 && launcher_program_address_space( p->path ) == LAUNCHER_ADDRESS_LOW);
-
-    return wants && l->options->address_space_bits == 39 && l->options->alias_window;
+    return p->settings.address_space < 0 && launcher_program_address_space( p->path ) == LAUNCHER_ADDRESS_LOW &&
+           l->options->address_space_bits == 39 && l->options->alias_window;
 }
 
 /* Whether this process can run it at all. Nothing here can widen or narrow the
@@ -2518,13 +2517,12 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
 
             ADD_ROW( ROW_ADDRESS, SECTION_EMULATION, "Address space",
                      "Auto reads the game's header: one linked for a fixed address in the low 4 GB runs in this "
-                     "Autorun's window, with all of its memory, through Box64, or from Autorun 32-bit where there "
-                     "is no window. 32-bit, Any and Window (experimental) override the choice." );
+                     "Autorun's window, with all of its memory, or from Autorun 32-bit where there is no window. "
+                     "32-bit and Any override a header that does not tell the truth." );
             row->kind = UI_ROW_DROPDOWN;
-            row->choices = 4;
+            row->choices = 3;
             if (p->settings.address_space >= 0)
-                snprintf( row->value, sizeof(row->value), "%s", p->settings.address_space == 2 ? "Window" :
-                          p->settings.address_space ? "32-bit" : "Any" );
+                snprintf( row->value, sizeof(row->value), "%s", p->settings.address_space ? "32-bit" : "Any" );
             else snprintf( row->value, sizeof(row->value), "Auto (%s)",
                            needs == LAUNCHER_ADDRESS_LOW ?
                                (l->options->address_space_bits == 39 && l->options->alias_window ? "window" : "32-bit") :
@@ -2903,8 +2901,8 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         case ROW_ADDRESS:
         {
             /* Auto, then the answers, so any can be forced. */
-            static const int values[4] = { -1, 1, 0, 2 };
-            struct ui_row items[4] = {0};
+            static const int values[3] = { -1, 1, 0 };
+            struct ui_row items[3] = {0};
             int selected;
 
             if (action == UI_ACTION_RESET) selected = 0;
@@ -2913,10 +2911,8 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
                 snprintf( items[0].label, sizeof(items[0].label), "Auto" );
                 snprintf( items[1].label, sizeof(items[1].label), "32-bit" );
                 snprintf( items[2].label, sizeof(items[2].label), "Any" );
-                snprintf( items[3].label, sizeof(items[3].label), "Window" );
-                selected = ui_settings_dropdown( ui, &list, items, 4,
-                                                 p->settings.address_space < 0 ? 0 : p->settings.address_space == 2 ? 3 :
-                                                 p->settings.address_space ? 1 : 2 );
+                selected = ui_settings_dropdown( ui, &list, items, 3,
+                                                 p->settings.address_space < 0 ? 0 : p->settings.address_space ? 1 : 2 );
                 if (selected < 0) break;
             }
             else break;

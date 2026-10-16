@@ -76,6 +76,11 @@ if [ "$x86" = 0 ] || [ ! -f "$hw/build-wine-amd64-pe/Makefile" ]; then
     step "Building the AMD64 runtime (FEX, DXVK, VKD3D-Proton)"
     WINE_NX_FEX=1 WINE_NX_DXVK=1 WINE_NX_VKD3D=1 sh "$hw/build-amd64-components.sh"
 fi
+if [ "$x86" = 0 ]; then
+    # Our WoW64 FEX for fixed-low games in the alias window, under its own name.
+    step "Building FEX for the alias window"
+    sh "$hw/tools/build-fex-window.sh"
+fi
 if [ "$x86" = 1 ]; then
     step "Building the x86 runtime"
     sh "$hw/build-x86.sh"

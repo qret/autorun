@@ -391,6 +391,17 @@ if args.x86:
 else:
     assert args.amd64.is_file(), f'{args.amd64} is missing; run build-amd64-components.sh, or pass --x86'
     print(f'AMD64 runtime build {merge_amd64(args.amd64, stage_root)} merged')
+    # The one Windows module of Autorun's own: its WoW64 FEX for fixed-low games
+    # in the alias window (tools/build-fex-window.sh), under its own name beside
+    # the DLL repository's libwow64fex.dll. Without it such games use Box64.
+    fex_window = horizon_wine / 'toolchains/build-fex-2609-window/libwow64fex-window.dll'
+    if fex_window.is_file():
+        (stage / 'drive_c/windows/system32').mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fex_window, stage / 'drive_c/windows/system32' / fex_window.name)
+        shutil.copy2(fex_window.parent / 'FEX-MIT.txt', licenses / 'FEX-MIT.txt')
+        print(f'{fex_window.name} staged')
+    else:
+        print(f'{fex_window.name} not built; fixed-low games in the alias window will use Box64')
 subprocess.run([sys.executable, str(tools / 'verify-package.py'), str(stage), '--dlls', str(args.dlls)],
                check=True)
 

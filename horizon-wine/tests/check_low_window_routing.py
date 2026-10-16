@@ -67,10 +67,8 @@ int main(void)
     detected = LAUNCHER_ADDRESS_LOW;
     p.settings.address_space = 0;
     assert(address_space_fits(&l, &p));
-    /* Window: a fixed-low game stays in the 39-bit process only when the alias
-     * window has room there. */
-    p.settings.address_space = 2;
-    assert(!address_space_fits(&l, &p));
+    /* A fixed-low game forced to Any does not take the window: Any means the
+     * header is wrong and the game runs as it is. */
     o.alias_window = 1;
     assert(address_space_fits(&l, &p));
     o.address_space_bits = 32;

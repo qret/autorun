@@ -4453,11 +4453,12 @@ NTSTATUS wine_nx_loader_bootstrap( const UNICODE_STRING *main_nt_name )
     return STATUS_SUCCESS;
 }
 
-/* Load only native modules here. The x86 ntdll loader owns guest imports/TLS. */
+/* Load only native modules here. The x86 ntdll loader owns guest imports/TLS.
+ * fex is 2 for our FEX build of a game in the alias window (runtime.c). */
 NTSTATUS wine_nx_loader_prepare_wow64( HMODULE *native_ntdll, void **initialize, BOOL fex )
 {
     const WCHAR *names[] = { L"ntdll.dll", L"wow64.dll", L"wow64win.dll",
-                            fex ? L"libwow64fex.dll" : L"winebox64.dll" };
+                            fex == 2 ? L"libwow64fex-window.dll" : fex ? L"libwow64fex.dll" : L"winebox64.dll" };
     WINE_MODREF *loaded[ARRAY_SIZE(names)];
     NTSTATUS status = STATUS_SUCCESS;
     const WCHAR **cpu_dll;
@@ -4500,7 +4501,7 @@ NTSTATUS wine_nx_loader_prepare_wow64( HMODULE *native_ntdll, void **initialize,
         if (!status)
         {
             *cpu_dll = names[3];
-            wine_nx_trace( "[WOW64] selected %s", fex ? "libwow64fex.dll" : "winebox64.dll" );
+            wine_nx_trace( "[WOW64] selected %s", fex == 2 ? "libwow64fex-window.dll" : fex ? "libwow64fex.dll" : "winebox64.dll" );
         }
     }
     RtlLeaveCriticalSection( &loader_section );

@@ -495,6 +495,11 @@ int wine_nx_runtime_verbose;
 static enum launcher_d3d_renderer runtime_d3d;
 static enum dxvk_source runtime_dxvk_source;
 static int runtime_fex;
+/* A fixed-low game in the alias window under FEX: our build of the WoW64 FEX
+ * (fex/alias-window.patch) under its own name, told log2 of the window's base. */
+static int runtime_fex_window;
+static unsigned int runtime_window_shift;
+#define RUNTIME_FEX_WINDOW_DLL "libwow64fex-window.dll"
 static int runtime_four_cores;
 static int runtime_dxvk_hud;
 static char runtime_vkd3d_version[32];
@@ -1645,6 +1650,13 @@ static size_t runtime_fex_environment( const char *target, char *buffer, size_t 
             used = sizeof(wide_host);
         }
     }
+    if (runtime_fex_window && runtime_window_shift)
+    {
+        int length = snprintf( buffer + used, size - used, "WINE_NX_FEX_WINDOW_SHIFT=%u", runtime_window_shift );
+
+        if (length < 0 || (size_t)length + 1 > size - used) return 0;
+        used += length + 1;
+    }
     if (target[1] != ':' &&
         launcher_program_settings_path( RUNTIME_DIR, target, path, sizeof(path) ) &&
         !launcher_kv_load( &kv, path ))
@@ -1696,7 +1708,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     RTL_USER_PROCESS_PARAMETERS *params;
     char nt_path[640], dll_path[1024], current_dir[512];
     char cmdline[1024], args_buf[896], args_path[512];
-    char fex_environment[NX_FEX_OPTION_COUNT * 80];
+    char fex_environment[NX_FEX_OPTION_COUNT * 80 + 64];
     size_t chars, size, i, fex_environment_size;
     WCHAR *cursor;
     const char *cmdline_str, *dxvk_hud = launcher_hud_values[runtime_dxvk_hud];
@@ -2325,7 +2337,7 @@ static NTSTATUS runtime_start_wow64( void *module, void *entry,
     status = wine_nx_loader_bootstrap( main_nt_name );
     log_line( "[WOW64] native loader bootstrap status=%08x", status );
     if (status) return status;
-    status = wine_nx_loader_prepare_wow64( &native, &initialize, runtime_fex );
+    status = wine_nx_loader_prepare_wow64( &native, &initialize, runtime_fex_window ? 2 : runtime_fex );
     log_line( "[WOW64] native DLLs status=%08x", status );
     if (status) return status;
     status = map_pe_image( WINE_NX_RUNTIME_SYSWOW64 "/ntdll.dll", (void **)&guest, &size );
@@ -3483,8 +3495,8 @@ static int runtime_program_needs_low( const char *program )
     return launcher_program_address_space( program ) == LAUNCHER_ADDRESS_LOW;
 }
 
-/* Whether a program goes through the alias window: 1 when set to Window, 2 for
- * Auto with a fixed-low header (launcher.c, program_runs_in_window). */
+/* Whether a program goes through the alias window: Auto with a fixed-low
+ * header (launcher.c, program_runs_in_window). */
 static int runtime_program_window( const char *program )
 {
     struct launcher_kv kv;
@@ -3495,9 +3507,9 @@ static int runtime_program_window( const char *program )
         launcher_kv_load( &kv, path ))
     {
         launcher_settings_read( &kv, &settings );
-        if (settings.address_space >= 0) return settings.address_space == 2;
+        if (settings.address_space >= 0) return 0;
     }
-    return launcher_program_address_space( program ) == LAUNCHER_ADDRESS_LOW ? 2 : 0;
+    return launcher_program_address_space( program ) == LAUNCHER_ADDRESS_LOW;
 }
 
 /* Leave the program in run-next.txt for Autorun 32-bit and ask the console for
@@ -4032,11 +4044,18 @@ int main( int argc, char **argv )
     open_game_log( target );
     log_line( "wine-nx-runtime: generic Wine ntdll PE loader path" );
     log_line( "[BUILD] %s", WINE_NX_RUNTIME_BUILD );
-    /* Set to Window, or Auto with a fixed-low header, and room for the window:
-     * only Box64 reaches it so far, whatever the game's CPU setting. */
+    /* Auto with a fixed-low header, and room for the window: Box64 reaches it,
+     * and FEX through our build of it when that is on the card. */
     if (alias_window_available && !low_window_available && runtime_address_space_bits() == 39 &&
-        (window_game = runtime_program_window( target )))
-        runtime_fex = 0;
+        (window_game = runtime_program_window( target )) && runtime_fex)
+    {
+        if (!access( WINE_SYSTEM_DIR "/" RUNTIME_FEX_WINDOW_DLL, R_OK )) runtime_fex_window = 1;
+        else
+        {
+            log_line( "[WINDOW] no " RUNTIME_FEX_WINDOW_DLL " on the card; this game runs through Box64" );
+            runtime_fex = 0;
+        }
+    }
     log_line( "[SYNC] %s", horizon_fast_sync_enabled ? "Horizon queued waits" : "Standard" );
     wine_nx_thread_configure_cores( runtime_four_cores );
     log_line( "[SDCACHE] %s", sd_cache ? "sdmc reads cached: 128 KB chunks, 8 per file, 32 to 192 MB in all"
@@ -4058,6 +4077,7 @@ int main( int argc, char **argv )
 #ifdef WINE_NX_FEX
         const char *cpu_module = target_machine == IMAGE_FILE_MACHINE_AMD64 ?
                                  WINE_SYSTEM_DIR "/libarm64ecfex.dll" :
+                                 runtime_fex_window ? WINE_SYSTEM_DIR "/" RUNTIME_FEX_WINDOW_DLL :
                                  WINE_SYSTEM_DIR "/libwow64fex.dll";
 
         if ((target_machine != IMAGE_FILE_MACHINE_AMD64 && target_machine != IMAGE_FILE_MACHINE_I386) ||
@@ -4078,7 +4098,7 @@ int main( int argc, char **argv )
 #endif
     }
     log_line( "[CPU] %s", target_machine == IMAGE_FILE_MACHINE_ARM64 ? "Native ARM64" :
-                         runtime_fex ? "FEX-2609" : "Box64" );
+                         runtime_fex_window ? "FEX-2609, alias window build" : runtime_fex ? "FEX-2609" : "Box64" );
     /* Before any guest code runs or its image is mapped: keep the window's
      * addresses for it and tell Box64 where it is. */
     if (window_game && target_machine == IMAGE_FILE_MACHINE_I386)
@@ -4086,9 +4106,14 @@ int main( int argc, char **argv )
         extern BOOL wine_nx_box64_set_window( uintptr_t base ) __attribute__((weak));
         uintptr_t base = wine_nx_alias_window_reserve();
 
+        /* The window's base reaches the rest of the runtime through Box64's
+         * (virtual.c, window_address), whichever translator runs the game. */
         if (base && wine_nx_box64_set_window && wine_nx_box64_set_window( base ))
-            log_line( "[WINDOW] in use (%s): guest addresses below 128 MiB live at %010llx",
-                      window_game == 2 ? "Auto, fixed-low header" : "set to Window", (unsigned long long)base );
+        {
+            runtime_window_shift = __builtin_ctzll( base );
+            log_line( "[WINDOW] in use (Auto, fixed-low header): guest addresses below 128 MiB live at %010llx",
+                      (unsigned long long)base );
+        }
         else
         {
             log_line( "[WINDOW] FAIL: no window for this game (base %010llx); it goes to Autorun 32-bit",

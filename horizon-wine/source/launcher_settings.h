@@ -412,7 +412,8 @@ static inline void launcher_settings_read( const struct launcher_kv *kv, struct 
     {
         if (!strcasecmp( value, "32-bit" ) || !strcmp( value, "32" )) settings->address_space = 1;
         else if (!strcasecmp( value, "any" )) settings->address_space = 0;
-        else if (!strcasecmp( value, "window" )) settings->address_space = 2;
+        /* Window was a choice of its own until Auto took the window for
+         * fixed-low games; a game set to it is now Auto. */
     }
     settings->framebuffer = -1;
     if (launcher_kv_get( kv, "windows", value, sizeof(value) ))
@@ -484,7 +485,7 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
     static const char *states[] = { NULL, "0", "1" };
 
     if (settings->d3d < LAUNCHER_D3D_WINE || settings->d3d > LAUNCHER_D3D_DXVK_VKD3D ||
-        settings->address_space < -1 || settings->address_space > 2 ||
+        settings->address_space < -1 || settings->address_space > 1 ||
         settings->dxvk_hud < 0 || settings->dxvk_hud >= LAUNCHER_HUD_COUNT ||
         settings->dxvk_source < 0 || settings->dxvk_source >= DXVK_SOURCE_COUNT ||
         settings->frame_limit < 0 || settings->frame_limit >= LAUNCHER_FRAME_LIMIT_COUNT ||
@@ -499,7 +500,6 @@ static inline int launcher_settings_write( struct launcher_kv *kv, const struct 
            launcher_kv_set( kv, "cpu", settings->fex ? NULL : "box64" ) &&
            launcher_kv_set( kv, "four-cores", settings->four_cores ? NULL : "0" ) &&
            launcher_kv_set( kv, "address-space", settings->address_space < 0 ? NULL :
-                                                 settings->address_space == 2 ? "window" :
                                                  settings->address_space ? "32-bit" : "any" ) &&
            launcher_kv_set( kv, "windows", settings->framebuffer < 0 ? NULL :
                                            settings->framebuffer ? "framebuffer" : "compositor" ) &&

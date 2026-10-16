@@ -974,6 +974,8 @@ static const struct
 #ifdef WINE_NX_FEX
     { "libarm64ecfex.dll", wine_nx_fex_unix_funcs },
     { "libwow64fex.dll", wine_nx_fex_unix_funcs },
+    /* our build of it for games in the alias window (runtime.c, runtime_fex_window) */
+    { "libwow64fex-window.dll", wine_nx_fex_unix_funcs },
 #endif
 #ifdef WINE_NX_BOX64_INTERPRETER
     { "winebox64.dll", wine_nx_winebox64_unix_funcs },
@@ -2566,21 +2568,26 @@ static void commit_arm64ec_map( struct file_view *view )
 }
 
 #if defined(__SWITCH__) && defined(WINE_NX_FEX)
+static void *window_address( const void *addr );
+
 NTSTATUS wine_nx_fex_protect_code( void *base, BOOL enable )
 {
     struct file_view *view;
     sigset_t sigset;
     NTSTATUS status = STATUS_NOT_SUPPORTED;
     BYTE vprot;
+    void *guest = base;
 
     if (!base || ((ULONG_PTR)base & host_page_mask)) return STATUS_INVALID_PARAMETER;
+    /* The code of a game in the alias window lives at the window's base. */
+    base = window_address( base );
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
     view = find_view( base, host_page_size );
     vprot = get_host_page_vprot( base );
     if (!view || (view->protect & (VPROT_SYSTEM | VPROT_WRITEWATCH)) ||
         !(vprot & VPROT_COMMITTED) || (vprot & VPROT_GUARD) ||
         !(vprot & (VPROT_WRITE | VPROT_WRITECOPY))) goto done;
-    if (is_arm64ec() ? !is_emulated_code( (ULONG_PTR)base ) : (ULONG_PTR)base >= 0x100000000ull)
+    if (is_arm64ec() ? !is_emulated_code( (ULONG_PTR)guest ) : (ULONG_PTR)guest >= 0x100000000ull)
         goto done;
 
     if (enable && (vprot & VPROT_FEX_SMC))
