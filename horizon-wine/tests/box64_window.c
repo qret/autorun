@@ -152,6 +152,54 @@ int main(void)
         wine_nx_box64_invalidate( round ? WINDOW + FUNC : FUNC, sizeof(func), 0 );
 #endif
     }
+    {
+        /* String instructions, moffs and XLAT reach the window too, and an operand
+         * through ESI right after a string instruction lands where it should. */
+        static const unsigned char strings[] = {
+            0xbe,0x00,0x10,0x40,0x00,        /* mov esi, 0x401000 */
+            0xbf,0x40,0x10,0x40,0x00,        /* mov edi, 0x401040 */
+            0xb9,0x04,0x00,0x00,0x00,        /* mov ecx, 4 */
+            0xfc,                            /* cld */
+            0xf3,0xa5,                       /* rep movsd */
+            0xa1,0x44,0x10,0x40,0x00,        /* mov eax, [0x401044]   moffs */
+            0xa3,0x50,0x10,0x40,0x00,        /* mov [0x401050], eax   moffs */
+            0xbb,0x60,0x10,0x40,0x00,        /* mov ebx, 0x401060 */
+            0xb0,0x03,                       /* mov al, 3 */
+            0xd7,                            /* xlat */
+            0xa2,0x54,0x10,0x40,0x00,        /* mov [0x401054], al    moffs */
+            0xbf,0x58,0x10,0x40,0x00,        /* mov edi, 0x401058 */
+            0xb8,0x11,0x22,0x33,0x44,        /* mov eax, 0x44332211 */
+            0xab,                            /* stosd */
+            0xbe,0x58,0x10,0x40,0x00,        /* mov esi, 0x401058 */
+            0xac,                            /* lodsb */
+            0x88,0x05,0x5c,0x10,0x40,0x00,   /* mov [0x40105c], al */
+            0x8b,0x0e,                       /* mov ecx, [esi]        after a string instruction */
+            0x89,0x0d,0x70,0x10,0x40,0x00,   /* mov [0x401070], ecx */
+            0xbf,0x58,0x10,0x40,0x00,        /* mov edi, 0x401058 */
+            0xb0,0x33,                       /* mov al, 0x33 */
+            0xb9,0x08,0x00,0x00,0x00,        /* mov ecx, 8 */
+            0xf2,0xae,                       /* repne scasb */
+            0x89,0x3d,0x74,0x10,0x40,0x00,   /* mov [0x401074], edi */
+            0xba,0x00,0x1f,0x40,0x00,        /* mov edx, DONE */
+            0xff,0xe2                        /* jmp edx */
+        };
+        static const unsigned char table[] = { 0xa0, 0xa1, 0xa2, 0xa3 };
+
+        memcpy( image + 0x200, strings, sizeof(strings) );
+        memcpy( image + 0x1000, values, sizeof(values) );
+        memcpy( image + 0x1060, table, sizeof(table) );
+        init_context( &context, IMAGE + 0x200, STACK + 0x6000 );
+        status = wine_nx_box64_run( &context, STACK + 0x3000, &gates, &host, NULL, DONE, 1000, &executed );
+        printf( "strings: status=%08x esi=%08x edi=%08x [40]=%u [50]=%u [54]=%#x [58]=%#x [5c]=%#x [70]=%#x [74]=%#x\n",
+                (unsigned)status, (unsigned)context.Esi, (unsigned)context.Edi, (unsigned)data( 0x40 ),
+                (unsigned)data( 0x50 ), image[0x1054], (unsigned)data( 0x58 ), image[0x105c],
+                (unsigned)data( 0x70 ), (unsigned)data( 0x74 ) );
+        assert( status == STATUS_SUCCESS && context.Eip == DONE );
+        assert( data( 0x40 ) == 7 && data( 0x44 ) == 5 && data( 0x48 ) == 100 && data( 0x4c ) == 0 );
+        assert( data( 0x50 ) == 5 && image[0x1054] == 0xa3 && data( 0x58 ) == 0x44332211 );
+        assert( image[0x105c] == 0x11 && data( 0x70 ) == 0x11443322 && data( 0x74 ) == 0x40105b );
+        assert( context.Esi == 0x401059 && context.Edi == 0x40105b && context.Ecx == 5 );
+    }
 #ifdef WINE_NX_BOX64_DYNAREC
     {
         /* The window code ran translated, not handed to the interpreter. */
@@ -162,6 +210,6 @@ int main(void)
         assert( wine_nx_box64_dynarec_bytes > 0 && wine_nx_box64_native_entries > 0 );
     }
 #endif
-    puts( "Alias window: absolute, based and indexed operands, read-modify-write, LEA, a call and changed code passed" );
+    puts( "Alias window: operands, read-modify-write, LEA, a call, changed code, string instructions, moffs and XLAT passed" );
     return 0;
 }

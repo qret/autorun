@@ -36,6 +36,12 @@ endfunction()
 set(WINE_NX_BOX64_WINDOW_HOST
     "#ifndef WINE_NX_WINDOW_HOST\n#include <stdint.h>\nextern uintptr_t wine_nx_box64_window_base;\nstatic inline uintptr_t wine_nx_window_host(uintptr_t a) { return a < 0x8000000 ? a + wine_nx_box64_window_base : a; }\n#define WINE_NX_WINDOW_HOST(a) wine_nx_window_host((uintptr_t)(a))\n#endif\n")
 
+# Emitted by translated 32-bit code: move register r into the alias window when
+# its low half is below 128 MiB (no flags touched; xR15 is scratch), and do it
+# for the operands of a string instruction before it runs.
+set(WINE_NX_BOX64_WINDOW_EMIT
+    "extern uintptr_t wine_nx_box64_window_base;\nextern unsigned int wine_nx_box64_window_shift;\n#define WINE_NX_WINDOW_REG(r) do { LSRw(xR15, r, 27); SUBx_U12(xR15, xR15, 1); LSRx(xR15, xR15, 63); MOVw_REG(r, r); ADDx_REG_LSL(r, r, xR15, wine_nx_box64_window_shift); } while(0)\n#define WINE_NX_WINDOW_STRING(op) do { if(rex.is32bits && !rex.is67 && wine_nx_box64_window_shift && (op)>=0xA4 && (op)<=0xAF && (op)!=0xA8 && (op)!=0xA9) { if(!rex.seg && ((op)<=0xA7 || (op)==0xAC || (op)==0xAD)) WINE_NX_WINDOW_REG(xRSI); if((op)!=0xAC && (op)!=0xAD) WINE_NX_WINDOW_REG(xRDI); } } while(0)\n")
+
 function(wine_nx_add_box64_core target)
     cmake_parse_arguments(core "DYNAREC" "" "" ${ARGN})
     set(root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../vendor/box64")
@@ -76,6 +82,14 @@ function(wine_nx_add_box64_core target)
     set(sources)
     foreach(name ${emu_sources})
         file(READ "${root}/src/emu/${name}" text)
+        # An absolute moffs address of 32-bit code reaches the window.
+        string(REPLACE "(uintptr_t)(ptr_t)(F32+rex.offset)" "WINE_NX_WINDOW_HOST((ptr_t)(F32+rex.offset))" text "${text}")
+        if(NOT name STREQUAL "x64run_private.c")
+            string(FIND "${text}" "WINE_NX_WINDOW_HOST" position)
+            if(NOT position EQUAL -1)
+                string(PREPEND text "${WINE_NX_BOX64_WINDOW_HOST}")
+            endif()
+        endif()
         if(name STREQUAL "x64run_private.c")
             # Operand bytes are fetched here too, and a memory operand's address
             # reaches the window; an LEA's address is a number and does not.
@@ -106,6 +120,15 @@ function(wine_nx_add_box64_core target)
     wine_nx_box64_patch(run_source "#include \"modrm.h\""
         "#include \"modrm.h\"\nextern int wine_nx_box64_before_instruction(x64emu_t *, uintptr_t);"
         "interpreter hook include")
+    string(FIND "${run_source}" "(uintptr_t)(ptr_t)(F32+rex.offset)" position)
+    if(position EQUAL -1)
+        message(FATAL_ERROR "Pinned Box64 source changed: interpreter moffs")
+    endif()
+    string(REPLACE "(uintptr_t)(ptr_t)(F32+rex.offset)" "WINE_NX_WINDOW_HOST((ptr_t)(F32+rex.offset))" run_source "${run_source}")
+    wine_nx_box64_patch(run_source "R_AL = *(uint8_t*)(rex.offset + R_RBX + R_AL);"
+        "R_AL = *(uint8_t*)(rex.is32bits ? WINE_NX_WINDOW_HOST((uint32_t)(rex.offset + R_RBX + R_AL)) : (rex.offset + R_RBX + R_AL));"
+        "interpreter XLAT in the alias window")
+    string(PREPEND run_source "${WINE_NX_BOX64_WINDOW_HOST}")
     set(generated "${window_dir}/emu/x64run.c")
     wine_nx_box64_write("${generated}" "${run_source}")
 
@@ -312,8 +335,10 @@ function(wine_nx_add_box64_core target)
     # whole address is computed into a register (no displacement left for the
     # load) and then moved by the base: xR15 (x25) holds R15, which 32-bit code has
     # not got, and the flags, which hold the guest's, are not touched. An
-    # absolute address is moved when the block is translated. LEA asks for the
-    # number itself and sets wine_nx_box64_geted_raw.
+    # absolute address is moved when the block is translated. A guest register
+    # is taken by its low half only: a string instruction may leave the base in
+    # the high one (below). LEA asks for the number itself and sets
+    # wine_nx_box64_geted_raw.
     wine_nx_box64_patch(helper_source
         "    *fixaddress = 0;\n    if(hint>0) ret = hint;\n    if(hint>0 && hint<xRAX) scratch = hint;"
         "    *fixaddress = 0;\n    if(hint>0) ret = hint;\n    if(hint>0 && hint<xRAX) scratch = hint;\n    extern unsigned int wine_nx_box64_window_shift;\n    extern int wine_nx_box64_geted_raw;\n    int window = rex.is32bits && !rex.seg && wine_nx_box64_window_shift && !wine_nx_box64_geted_raw;\n    int window_done = 0;\n    if(window) {\n        absmax = 0;\n        mask = 0;\n        unscaled = NULL;\n    }"
@@ -328,7 +353,7 @@ function(wine_nx_add_box64_core target)
         "geted: absolute address in the alias window")
     wine_nx_box64_patch(helper_source
         "    *ed = ret;\n    return addr;\n}\n\n/* setup r2 to address pointed by ED"
-        "    if(window && !window_done) {\n        uint8_t dst = IS_GPR(ret) ? ((hint>0 && hint<xRAX) ? hint : x2) : ret;\n        LSRw(xR15, ret, 27);\n        SUBx_U12(xR15, xR15, 1);\n        LSRx(xR15, xR15, 63);\n        ADDx_REG_LSL(dst, ret, xR15, wine_nx_box64_window_shift);\n        ret = dst;\n    }\n    *ed = ret;\n    return addr;\n}\n\n/* setup r2 to address pointed by ED"
+        "    if(window && !window_done) {\n        uint8_t dst = IS_GPR(ret) ? ((hint>0 && hint<xRAX) ? hint : x2) : ret;\n        LSRw(xR15, ret, 27);\n        SUBx_U12(xR15, xR15, 1);\n        LSRx(xR15, xR15, 63);\n        if(dst != ret) MOVw_REG(dst, ret);\n        ADDx_REG_LSL(dst, dst, xR15, wine_nx_box64_window_shift);\n        ret = dst;\n    }\n    *ed = ret;\n    return addr;\n}\n\n/* setup r2 to address pointed by ED"
         "geted: move an operand into the alias window")
     string(PREPEND helper_source "${WINE_NX_BOX64_WINDOW_HOST}")
     set(helper_generated "${CMAKE_CURRENT_BINARY_DIR}/${target}-dynarec_arm64_helper.c")
@@ -351,7 +376,22 @@ function(wine_nx_add_box64_core target)
         "                addr = geted(dyn, addr, ninst, nextop, &ed, gd, &fixedaddress, NULL, 0, 0, rex, NULL, 0, 0);\n                if(gd!=ed) {    // it's sometimes used as a 3 bytes NOP"
         "                wine_nx_box64_geted_raw = 1;\n                addr = geted(dyn, addr, ninst, nextop, &ed, gd, &fixedaddress, NULL, 0, 0, rex, NULL, 0, 0);\n                wine_nx_box64_geted_raw = 0;\n                if(gd!=ed) {    // it's sometimes used as a 3 bytes NOP"
         "LEA keeps the guest address")
-    string(PREPEND opcodes_source "extern int wine_nx_box64_geted_raw;\n")
+    # A string instruction reaches ESI and EDI directly: both move into the window
+    # before it, and the high half they keep is cut off by every 32-bit use and
+    # by geted. An absolute moffs address and XLAT's EBX+AL move like operands.
+    wine_nx_box64_patch(opcodes_source "    opcode = F8;\n"
+        "    opcode = F8;\n    WINE_NX_WINDOW_STRING(opcode);\n" "string operands in the alias window")
+    string(FIND "${opcodes_source}" "            } else {\n                MOV64y(x1, u64);\n                if(rex.seg) {" position)
+    if(position EQUAL -1)
+        message(FATAL_ERROR "Pinned Box64 source changed: moffs address")
+    endif()
+    string(REPLACE "            } else {\n                MOV64y(x1, u64);\n                if(rex.seg) {"
+        "            } else {\n                if(rex.is32bits && !rex.is67 && wine_nx_box64_window_shift && (uint32_t)u64 < 0x8000000)\n                    MOV64x(x1, (uint64_t)(uint32_t)u64 + wine_nx_box64_window_base);\n                else\n                MOV64y(x1, u64);\n                if(rex.seg) {"
+        opcodes_source "${opcodes_source}")
+    wine_nx_box64_patch(opcodes_source "                UXTBw(x1, xRAX);\n            }\n            LDRB_REG(x1, xRBX, x1);"
+        "                UXTBw(x1, xRAX);\n            }\n            if(rex.is32bits && !rex.seg && wine_nx_box64_window_shift) {\n                ADDw_REG(x1, xRBX, x1);\n                WINE_NX_WINDOW_REG(x1);\n                LDRB_U12(x1, x1, 0);\n            } else\n            LDRB_REG(x1, xRBX, x1);"
+        "XLAT in the alias window")
+    string(PREPEND opcodes_source "extern int wine_nx_box64_geted_raw;\n${WINE_NX_BOX64_WINDOW_EMIT}")
     set(opcodes_generated "${CMAKE_CURRENT_BINARY_DIR}/${target}-dynarec_arm64_00.c")
     file(WRITE "${opcodes_generated}" "${opcodes_source}")
     list(APPEND pass_sources "${opcodes_generated}")
@@ -381,7 +421,9 @@ function(wine_nx_add_box64_core target)
                 "                addr = geted(dyn, addr, ninst, nextop, &ed, x3, &fixedaddress, NULL, 0, 0, rex, NULL, 0, 0);\n                BFIx(gd, ed, 0, 16);"
                 "                wine_nx_box64_geted_raw = 1;\n                addr = geted(dyn, addr, ninst, nextop, &ed, x3, &fixedaddress, NULL, 0, 0, rex, NULL, 0, 0);\n                wine_nx_box64_geted_raw = 0;\n                BFIx(gd, ed, 0, 16);"
                 "16-bit LEA keeps the guest address")
-            string(PREPEND text "extern int wine_nx_box64_geted_raw;\n")
+            wine_nx_box64_patch(text "    switch(opcode) {"
+                "    WINE_NX_WINDOW_STRING(opcode);\n    switch(opcode) {" "16-bit string operands in the alias window")
+            string(PREPEND text "extern int wine_nx_box64_geted_raw;\n${WINE_NX_BOX64_WINDOW_EMIT}")
         endif()
         if(name STREQUAL "dynarec_native_pass.c")
             set(window_pass "${window_dir}/dynarec/${name}")

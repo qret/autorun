@@ -344,7 +344,7 @@ int wine_nx_box64_before_instruction( x64emu_t *emu, uintptr_t pc )
 {
     struct nx_engine *engine = (struct nx_engine *)emu;
     unsigned char opcode = 0;
-    unsigned int prefix;
+    unsigned int prefix, segment = 0, short_address = 0;
     NTSTATUS status;
     emu->ip.q[0] = pc;
     if ((engine->is32bits && emu->segs[_CS] != 0x23) ||
@@ -378,6 +378,9 @@ int wine_nx_box64_before_instruction( x64emu_t *emu, uintptr_t pc )
         status = fetch_code_byte( engine, pc + prefix, &opcode );
         if (status == STATUS_ACCESS_VIOLATION) stop_fault( emu, pc + prefix, 8 );
         if (status) stop_engine( emu, status );
+        if (opcode == 0x26 || opcode == 0x2e || opcode == 0x36 || opcode == 0x3e || opcode == 0x64 || opcode == 0x65)
+            segment = 1;
+        if (opcode == 0x67) short_address = 1;
         if (opcode != 0x26 && opcode != 0x2e && opcode != 0x36 && opcode != 0x3e &&
             opcode != 0x64 && opcode != 0x65 && opcode != 0x66 && opcode != 0x67 &&
             opcode != 0xf0 && opcode != 0xf2 && opcode != 0xf3 &&
@@ -387,6 +390,17 @@ int wine_nx_box64_before_instruction( x64emu_t *emu, uintptr_t pc )
     /* VEX (AVX) is not advertised; LES/LDS share these opcodes in 32-bit mode. */
     if (opcode == 0xc4 || opcode == 0xc5 || (!engine->is32bits && opcode == 0x62))
         stop_engine( emu, STATUS_NOT_SUPPORTED );
+    /* A string instruction reaches ESI and EDI as host pointers: move them into
+     * the alias window, as translated code does; every 32-bit use of the
+     * register cuts the base off again. */
+    if (engine->is32bits && wine_nx_box64_window_base && !short_address &&
+        opcode >= 0xa4 && opcode <= 0xaf && opcode != 0xa8 && opcode != 0xa9)
+    {
+        if (!segment && (opcode <= 0xa7 || opcode == 0xac || opcode == 0xad))
+            emu->regs[_SI].q[0] = window_host( emu->regs[_SI].dword[0] );
+        if (opcode != 0xac && opcode != 0xad)
+            emu->regs[_DI].q[0] = window_host( emu->regs[_DI].dword[0] );
+    }
     --engine->remaining;
     ++engine->executed;
     return 0;
