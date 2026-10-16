@@ -2,18 +2,6 @@ cmake_minimum_required(VERSION 3.18)
 
 project(wine_nx_probe LANGUAGES C CXX ASM)
 
-set(WINE_NX_BOOT_BUNDLE "" CACHE PATH "Verified Atmosphere/HOC boot payload bundle")
-if(WINE_NX_BOOT_BUNDLE)
-    set(WINE_NX_BOOT_ROMFS_FILES "")
-    foreach(file setup_boot_manifest.h romfs/setup/loader-stock.kip romfs/setup/loader-hoc.kip
-                 romfs/setup/mesosphere.bin
-                 romfs/setup/LICENSE.Atmosphere romfs/setup/LICENSE.HOC)
-        if(NOT EXISTS "${WINE_NX_BOOT_BUNDLE}/${file}")
-            message(FATAL_ERROR "Incomplete boot bundle: ${file}")
-        endif()
-        list(APPEND WINE_NX_BOOT_ROMFS_FILES "${WINE_NX_BOOT_BUNDLE}/${file}")
-    endforeach()
-endif()
 set(WINE_NX_PE_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build-wine-arm64-pe-clean"
     CACHE PATH "Wine PE build supplying generated COM headers")
 
@@ -673,7 +661,7 @@ target_sources(wine-nx-runtime PRIVATE
     source/input_profile.c source/launcher_input.c
     source/launcher_svg.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c
     source/launcher_image.c source/launcher_artwork.c source/steamgriddb.c source/autorun_update.c source/autorun_install.c
-    source/launcher_update.c source/launcher_setup.c source/setup_boot.c source/forwarder.c
+    source/launcher_update.c source/launcher_setup.c source/forwarder.c
     source/launcher_dlls.c source/horizon_dlls.c source/horizon_dlls_curl.c
     "${CMAKE_CURRENT_BINARY_DIR}/horizon_dll_features.h")
 # What this runtime reports to the DLL repository's manifest, read from the same
@@ -687,10 +675,6 @@ add_custom_command(
             --header "${CMAKE_CURRENT_BINARY_DIR}/horizon_dll_features.h"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/runtime_features.py" ${HORIZON_DLL_FEATURE_SOURCES}
     VERBATIM)
-if(WINE_NX_BOOT_BUNDLE)
-    target_compile_definitions(wine-nx-runtime PRIVATE WINE_NX_BOOT_BUNDLE)
-    target_include_directories(wine-nx-runtime PRIVATE "${WINE_NX_BOOT_BUNDLE}")
-endif()
 
 set_target_properties(wine-nx-runtime PROPERTIES SUFFIX ".elf")
 
@@ -1133,16 +1117,11 @@ if(NACPTOOL AND ELF2NRO)
         VERBATIM
     )
 
-    set(RUNTIME_ROMFS_ARG "")
-    if(WINE_NX_BOOT_BUNDLE)
-        set(RUNTIME_ROMFS_ARG "--romfsdir=${WINE_NX_BOOT_BUNDLE}/romfs")
-    endif()
     add_custom_command(
         OUTPUT "${RUNTIME_NRO_FILE}"
         COMMAND "${ELF2NRO}" "$<TARGET_FILE:wine-nx-runtime>" "${RUNTIME_NRO_FILE}" "--nacp=${RUNTIME_NACP_FILE}"
-                "--icon=${CMAKE_CURRENT_SOURCE_DIR}/assets/autorun.jpg" ${RUNTIME_ROMFS_ARG}
+                "--icon=${CMAKE_CURRENT_SOURCE_DIR}/assets/autorun.jpg"
         DEPENDS wine-nx-runtime "${RUNTIME_NACP_FILE}" "${CMAKE_CURRENT_SOURCE_DIR}/assets/autorun.jpg"
-                ${WINE_NX_BOOT_ROMFS_FILES}
         VERBATIM
     )
 

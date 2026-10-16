@@ -10,9 +10,9 @@
 #   --jobs   parallel jobs (default: the machine's cores)
 #
 # Needs Docker, git, Python 3, make and bison (Homebrew's, on a Mac). It fetches
-# the llvm-mingw toolchain Wine's Windows side is built with, and builds the
-# boot payloads Quick setup installs, when they are missing. The Windows DLLs
-# are not in the archive: Autorun downloads them.
+# the llvm-mingw toolchain Wine's Windows side is built with when it is missing.
+# The Windows DLLs are not in the archive: Autorun downloads them. Autorun
+# carries no boot patches: nothing in the firmware is replaced.
 set -eu
 root="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 hw="$root/horizon-wine"
@@ -64,16 +64,6 @@ export WINE_NX_LLVM_MINGW="$llvm" WINE_NX_JOBS="$jobs"
 
 step "Pulling $image"
 docker pull -q "$image" >/dev/null
-
-# The boot payloads Quick setup installs (Atmosphere 1.11.2's Mesosphere and
-# loader, and Horizon-OC's), embedded in the runtime. Built once; it takes a
-# while, as Atmosphere's libraries are built twice. Atmosphere builds only
-# against devkitPro's released libnx, which the image keeps apart.
-if [ ! -f "$hw/toolchains/boot-payloads/bundle/setup_boot_manifest.h" ]; then
-    step "Building the boot payloads (Atmosphere and Horizon-OC), once"
-    docker run --rm -v "$root:/work" -w /work -e WINE_NX_JOBS="$jobs" \
-        -e DEVKITPRO=/opt/devkitpro-release "$image" sh horizon-wine/build-boot-bundle.sh
-fi
 
 if [ "$clean" = 1 ]; then
     step "Removing the runtime's build folders"

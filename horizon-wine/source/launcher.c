@@ -46,7 +46,6 @@
 #include "launcher_update.h"
 #include "launcher_dlls.h"
 #include "launcher_setup.h"
-#include "setup_boot.h"
 #include "launcher_graphics.h"
 #include "launcher_dxvk.h"
 #include "autorun_install.h"
@@ -1776,24 +1775,12 @@ static void quick_setup( struct launcher *l )
     }
 }
 
+/* Quick setup comes up by itself once. Autorun installs no boot patches, so
+ * there is nothing for it to keep up to date afterwards. */
 static void offer_quick_setup( struct launcher *l )
 {
-    const struct setup_boot_manifest *manifest;
-    char bundle_id[33], prompted[33] = "";
     if (!l->options->install_forwarder) return;
-    if (!launcher_kv_get_int( &l->look, "setup-offered", 0 ))
-    {
-        quick_setup( l );
-        return;
-    }
-    manifest = setup_boot_bundled_manifest();
-    if (!setup_boot_needs_update( "sdmc:", manifest, NULL )) return;
-    setup_boot_bundle_id( manifest, bundle_id );
-    launcher_kv_get( &l->look, "setup-boot-prompted", prompted, sizeof(prompted) );
-    if (!strcmp( prompted, bundle_id )) return;
-    launcher_kv_set( &l->look, "setup-boot-prompted", bundle_id );
-    save_look( l );
-    quick_setup( l );
+    if (!launcher_kv_get_int( &l->look, "setup-offered", 0 )) quick_setup( l );
 }
 
 static int confirm_forwarder( struct launcher *l )
@@ -2028,8 +2015,8 @@ static int hand_over( struct launcher *l, struct program *p, unsigned long long 
     if (to_32bit && !l->options->title_installed( id ))
     {
         snprintf( message, sizeof(message),
-                  "%s is linked for a fixed address in the low 4 GB. Without the Atmosphere low-address patch "
-                  "it starts from a second HOME menu entry, Autorun 32-bit, which gives it that memory. "
+                  "%s is linked for a fixed address in the low 4 GB. It starts from a second HOME menu "
+                  "entry, Autorun 32-bit, which gives it that memory. "
                   "Nothing in the firmware or the boot files is changed.\n\nInstall Autorun 32-bit now?",
                   p->title );
         if (!l->options->install_forwarder_32bit ||
@@ -2093,8 +2080,7 @@ static int start_program( struct launcher *l, struct program *p, char *target, s
     {
         ui_message( ui, "Address space unavailable", l->options->address_space_bits != 39
                     ? "Start Autorun from its 39-bit forwarder. You can install it in Settings > System."
-                    : "This game needs the low 4 GB. Install Autorun 32-bit in Settings > System, "
-                      "or use the Atmosphere low-address patch." );
+                    : "This game needs the low 4 GB. Install Autorun 32-bit in Settings > System." );
         return 0;
     }
     /* Autorun ships no Windows DLLs: a card without them is offered them here. */
@@ -3377,9 +3363,8 @@ static void settings_menu( struct launcher *l )
         snprintf( rows[SET_MAKE_MAIN].label, sizeof(rows[0].label), "Make an Autorun forwarder" );
         snprintf( rows[SET_MAKE_MAIN].value, sizeof(rows[0].value), "%s",
                   l->options->install_forwarder ? "Autorun" : "Unavailable" );
-        rows[SET_MAKE_MAIN].help = "Installs the 39-bit Autorun forwarder. Fixed-address Win32 games run in it "
-                                   "with the Atmosphere low-address patch, or else in Autorun 32-bit. "
-                                   "Use emuMMC only.";
+        rows[SET_MAKE_MAIN].help = "Installs the 39-bit Autorun forwarder. Fixed-address Win32 games start from "
+                                   "Autorun 32-bit. Use emuMMC only.";
         rows[SET_MAKE_MAIN].adjustable = 0;
         rows[SET_MAKE_MAIN].disabled = !l->options->install_forwarder;
         snprintf( rows[SET_MAKE_32BIT].label, sizeof(rows[0].label), "Make an Autorun 32-bit forwarder" );

@@ -134,7 +134,7 @@ int wine_nx_low_window_probe( void (*report)( const char * ) )
     if (!low_window)
     {
         virtmemUnlock();
-        report( "[LOWVA] stock layout; fixed-low Win32 titles require the Atmosphere low-address patch" );
+        report( "[LOWVA] stock layout; fixed-low Win32 titles go to Autorun 32-bit" );
         return 0;
     }
     if (!reserved || !check_native_layout() || !check_guest_window())

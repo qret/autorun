@@ -2,7 +2,6 @@
 #include "launcher.h"
 #include "launcher_ui.h"
 #include "launcher_dlls.h"
-#include "setup_boot.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,40 +11,33 @@
 #include <switch.h>
 #endif
 
-/* The steps in the order they come. */
+/* The steps in the order they come. Autorun changes nothing in the firmware or
+ * the boot files: games linked for a fixed low address start from Autorun
+ * 32-bit, a second forwarder, on any Atmosphere. */
 enum setup_step
 {
-    STEP_FORWARDER, STEP_DLLS, STEP_LOADER, STEP_OVERCLOCK, STEP_MESOSPHERE, STEP_ENTRY, STEP_FINISH, STEP_COUNT
+    STEP_FORWARDER, STEP_DLLS, STEP_32BIT, STEP_FINISH, STEP_COUNT
 };
 
 struct setup_job
 {
     const struct wine_nx_launcher_options *launcher;
-    struct setup_boot_options boot;
     SDL_atomic_t done;
-    int forwarder;  /* 0: boot patches, 39 or 32: that forwarder */
+    int forwarder;  /* 39 or 32: the forwarder to install */
     unsigned int forwarder_result;
-    enum setup_boot_result boot_result;
     char detail[512];
 };
 
 static int setup_worker(void *opaque)
 {
     struct setup_job *job = opaque;
-    if (job->forwarder)
-    {
-        const char *step = NULL;
-        job->forwarder_result = job->forwarder == 32 ? job->launcher->install_forwarder_32bit(&step)
-                                                     : job->launcher->install_forwarder(&step);
-        if (job->forwarder_result)
-            snprintf(job->detail, sizeof(job->detail), "Could not install while %s (0x%X).",
-                     step ? step : "writing the forwarder", job->forwarder_result);
-    }
-    else
-    {
-        job->boot_result = setup_boot_install("sdmc:", "romfs:/setup", setup_boot_bundled_manifest(),
-                                             &job->boot, job->detail, sizeof(job->detail));
-    }
+    const char *step = NULL;
+
+    job->forwarder_result = job->forwarder == 32 ? job->launcher->install_forwarder_32bit(&step)
+                                                 : job->launcher->install_forwarder(&step);
+    if (job->forwarder_result)
+        snprintf(job->detail, sizeof(job->detail), "Could not install while %s (0x%X).",
+                 step ? step : "writing the forwarder", job->forwarder_result);
     SDL_AtomicSet(&job->done, 1);
     return 0;
 }
@@ -64,116 +56,62 @@ static int run_job(struct ui *ui, struct setup_job *job)
     ui_progress_begin(ui);
     while (!SDL_AtomicGet(&job->done))
     {
-        ui_progress_update(ui, "Autorun setup", job->forwarder ? "Installing the forwarder..." :
-                           "Verifying patches and saving the boot entry...", 0, 0);
+        ui_progress_update(ui, "Autorun setup", "Installing the forwarder...", 0, 0);
         SDL_Delay(16);
     }
     SDL_WaitThread(thread, NULL);
     ui_progress_end(ui);
-    if (job->forwarder ? job->forwarder_result != 0 :
-        job->boot_result != SETUP_BOOT_OK && job->boot_result != SETUP_BOOT_ALREADY)
+    if (job->forwarder_result)
     {
-        ui_message(ui, "Setup not completed", job->detail[0] ? job->detail : setup_boot_error(job->boot_result));
+        ui_message(ui, "Setup not completed", job->detail[0] ? job->detail : "The forwarder was not installed.");
         return 0;
     }
     return 1;
 }
 
-static int confirm_install(struct ui *ui, const struct wine_nx_launcher_options *options)
+static int confirm_install(struct ui *ui, const struct wine_nx_launcher_options *options, const char *name)
 {
-    char message[384];
-    snprintf(message, sizeof(message), "This installs Autorun on the HOME menu. Installing unofficial titles "
-             "can lead to a console ban. Use emuMMC.\n\n%s",
+    char message[384], title[96];
+    snprintf(message, sizeof(message), "This installs %s on the HOME menu. Installing unofficial titles "
+             "can lead to a console ban. Use emuMMC.\n\n%s", name,
              options->emummc > 0 ? "This console is on emuMMC." : options->emummc == 0 ?
              "This console is NOT on emuMMC." : "The current emuMMC status could not be checked.");
-    return ui_confirm(ui, "Install Autorun forwarder?", message, "Install");
-}
-
-static int running_atmosphere_matches(const struct setup_boot_manifest *manifest)
-{
-#ifdef __SWITCH__
-    u64 version = 0;
-    if (!manifest || R_FAILED(splInitialize())) return -1;
-    int known = R_SUCCEEDED(splGetConfig((SplConfigItem)65000, &version));
-    splExit();
-    return known ? ((version >> 40) & UINT32_C(0xffffff)) == manifest->atmosphere_version : -1;
-#else
-    (void)manifest;
-    return 1;
-#endif
+    snprintf(title, sizeof(title), "Install %s?", name);
+    return ui_confirm(ui, title, message, "Install");
 }
 
 int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *options, SDL_Texture *logo,
                        struct launcher_dlls *dlls)
 {
-    static const char *const steps[STEP_COUNT] =
-        { "Forwarder", "Windows DLLs", "Loader", "Overclocking", "Mesosphere", "Boot entry", "Finish" };
-    struct setup_boot_entry *entries = calloc(SETUP_BOOT_MAX_ENTRIES, sizeof(*entries));
+    static const char *const steps[STEP_COUNT] = { "Forwarder", "Windows DLLs", "Autorun 32-bit", "Finish" };
     struct setup_job job = { .launcher = options };
-    const struct setup_boot_manifest *manifest = setup_boot_bundled_manifest();
-    struct setup_boot_hoc_info hoc = {0};
     struct ui_input input;
-    size_t entry_count = 0;
-    int step = 0, selected = 0, top = 0, installed = 0, updating = 0, result = 0;
-    enum setup_boot_loader installed_loader = SETUP_BOOT_STOCK;
+    int step = 0, selected = 0, top = 0, result = 0;
     int forwarder = options->own_forwarder && options->address_space_bits == 39 && options->four_cores_available;
-    char detail[512] = "", description[768], title[160], notice_text[256];
-    enum setup_boot_result status;
-    int romfs_mounted = 0;
+    /* Asked once: the console is asked through ns, not something to do every frame. */
+    int have_32bit = options->title_installed && options->title_installed(options->forwarder_32bit_id);
+    char description[768], title[160];
 
-    if (!entries) { ui_message(ui, "Setup", "Not enough memory to open setup."); return 0; }
-#ifdef __SWITCH__
-    if (manifest) romfs_mounted = R_SUCCEEDED(romfsInit());
-#endif
-    if (manifest && !romfs_mounted)
-    {
-        ui_message(ui, "Setup", "Could not open bundled boot patches from Autorun.");
-        free(entries);
-        return 0;
-    }
-    status = setup_boot_recover("sdmc:", detail, sizeof(detail));
-    if (status != SETUP_BOOT_OK && status != SETUP_BOOT_ALREADY)
-    {
-        ui_message(ui, "Boot configuration recovery", detail[0] ? detail : setup_boot_error(status));
-        free(entries);
-#ifdef __SWITCH__
-        if (romfs_mounted) romfsExit();
-#endif
-        return 0;
-    }
-    if (status == SETUP_BOOT_ALREADY) { installed = 1; step = STEP_FINISH; }
-    status = setup_boot_list("sdmc:", entries, SETUP_BOOT_MAX_ENTRIES, &entry_count, detail, sizeof(detail));
-    if (status == SETUP_BOOT_OK)
-        for (size_t i = 0; i < entry_count; i++)
-            if (!strcasecmp(entries[i].name, SETUP_BOOT_ENTRY_NAME)) updating = 1;
-    if (manifest && updating) setup_boot_needs_update("sdmc:", manifest, &installed_loader);
-    if (manifest) setup_boot_hoc_probe("sdmc:", manifest, &hoc);
     ui_start_screen(ui);
     while (ui_begin_frame(ui))
     {
-        const char *items[SETUP_BOOT_MAX_ENTRIES] = {0}, *notes[SETUP_BOOT_MAX_ENTRIES] = {0};
+        const char *items[4] = {0}, *notes[4] = {0};
         const char *notice = NULL;
-        int disabled[SETUP_BOOT_MAX_ENTRIES] = {0};
+        int disabled[4] = {0};
         int count = 1, action = 0, previous = step;
-        int hoc_mismatch = manifest && !strcmp(hoc.path, "atmosphere/kips/hoc.kip") &&
-                           (!hoc.compatible || hoc.kip_version != manifest->hoc_kip_version);
-        /* The loader step has a third way, keeping Atmosphere as it is, and
-         * gives the notice's room to it. */
-        int keep_firmware = step == STEP_LOADER && options->install_forwarder_32bit;
-        int items_y = step == STEP_ENTRY ? 378 : keep_firmware ? 358 : 438, row_h = step == STEP_ENTRY ? 50 : 70;
+        int items_y = 438, row_h = 70;
         char dlls_text[160], dlls_status[64];
         int dlls_ready = launcher_dlls_is_ready(dlls), tone;
         description[0] = 0;
-        notice_text[0] = 0;
         snprintf(title, sizeof(title), "%s", steps[step]);
         switch (step)
         {
         case STEP_FORWARDER:
             snprintf(description, sizeof(description), "Start Autorun directly from the HOME Menu with a 39-bit address space "
-                     "and access to all four CPU cores. The next steps enable low-address memory for Win32 games.");
+                     "and access to all four CPU cores.");
             notice = forwarder ? "Your Autorun forwarder is ready." : "This session was not started from the current Autorun forwarder.";
             items[0] = forwarder ? "Continue" : "Install forwarder";
-            notes[0] = forwarder ? "Set up the loader and kernel patches" : "Add Autorun to the HOME Menu";
+            notes[0] = forwarder ? "Set up the Windows DLLs" : "Add Autorun to the HOME Menu";
             disabled[0] = !forwarder && !options->install_forwarder;
             break;
         case STEP_DLLS:
@@ -191,88 +129,26 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
                 count = 2;
             }
             break;
-        case STEP_LOADER:
-            snprintf(description, sizeof(description), "Choose the loader for the Autorun boot entry. "
-                     "Stock patches use separate files. The HOC option updates atmosphere/kips/hoc.kip and keeps its settings when selected.");
-            notice = manifest ? "Patches are bundled and verified against the selected Atmosphere package." :
-                                "Boot patches are not bundled in this build.";
-            items[0] = "Stock Atmosphere loader";
-            items[1] = "HOC loader with overclocking";
-            notes[0] = "For a standard Atmosphere setup";
-            notes[1] = "Keep HOC overclocking support";
-            count = 2;
-            if (keep_firmware)
+        case STEP_32BIT:
+            snprintf(description, sizeof(description), "Win32 games linked for a fixed address in the low 4 GB start from a "
+                     "second HOME menu entry, Autorun 32-bit, on any Atmosphere. Such a game is sent there by itself. "
+                     "Nothing in the firmware or the boot files is changed.");
+            notice = have_32bit ? "Autorun 32-bit is on the HOME menu." : "Autorun 32-bit is not installed yet.";
+            items[0] = have_32bit ? "Continue" : "Install Autorun 32-bit";
+            notes[0] = have_32bit ? "Finish setup" : "Add the 32-bit entry to the HOME Menu";
+            disabled[0] = !have_32bit && !options->install_forwarder_32bit;
+            if (!have_32bit)
             {
-                snprintf(description, sizeof(description), "Choose the loader for the Autorun boot entry, "
-                         "or keep Atmosphere exactly as it is: games linked for a fixed low address then start "
-                         "from a second HOME menu entry, Autorun 32-bit, and nothing in the firmware or the "
-                         "boot files changes.");
-                notice = NULL;
-                items[2] = "Keep my Atmosphere unchanged";
-                notes[2] = "Any build and version; installs Autorun 32-bit";
-                count = 3;
+                items[1] = "Skip for now";
+                notes[1] = "Install it later from Settings > System, or when a game needs it";
+                count = 2;
             }
-            break;
-        case STEP_OVERCLOCK:
-            snprintf(description, sizeof(description), "Choose which overclock settings the patched HOC loader should use. "
-                     "It replaces atmosphere/kips/hoc.kip so the HOC overlay can keep editing the active loader.");
-            if (hoc_mismatch) notice = "Installed HOC does not match the bundled version. Update HOC first, or choose the stock loader.";
-            else if (!*hoc.path) notice = "No existing HOC loader found. Bundled defaults will be used.";
-            else if (!hoc.compatible) notice = "Existing HOC settings use a different CUST layout and cannot be copied safely.";
-            else if (hoc.kip_version != manifest->hoc_kip_version)
-            {
-                snprintf(notice_text, sizeof(notice_text),
-                         "Existing HOC %u.%u.%u differs from bundled %u.%u.%u. Compatible settings can still be copied.",
-                         hoc.kip_version / 100, hoc.kip_version / 10 % 10, hoc.kip_version % 10,
-                         manifest->hoc_kip_version / 100, manifest->hoc_kip_version / 10 % 10,
-                         manifest->hoc_kip_version % 10);
-                notice = notice_text;
-            }
-            else notice = "Your existing HOC configuration can be copied into the patched loader.";
-            items[0] = "Keep my overclock settings";
-            items[1] = "Use the bundled HOC defaults";
-            notes[0] = "Copy your compatible HOC configuration";
-            notes[1] = "Start with the supplied configuration";
-            disabled[0] = !hoc.compatible || hoc_mismatch;
-            disabled[1] = hoc_mismatch;
-            count = 2;
-            break;
-        case STEP_MESOSPHERE:
-            snprintf(description, sizeof(description), "The Mesosphere low-window patch lets a 39-bit Autorun process "
-                     "place Win32 game memory below 4 GiB, while native code and JIT caches stay above it.");
-            notice = "The kernel and loader must match your supported Atmosphere build. The low-window change only applies to Autorun.";
-            items[0] = "Choose a Hekate boot entry";
-            notes[0] = "Select the configuration to copy";
-            break;
-        case STEP_ENTRY:
-            snprintf(description, sizeof(description), "Choose the entry to copy from bootloader/hekate_ipl.ini. "
-                     "Autorun keeps its other boot settings and uses the bundled loader, kernel and security monitor. The original is kept.%s%s",
-                     entry_count ? "" : "\n\n", entry_count ? "" : detail[0] ? detail : setup_boot_error(status));
-            count = (int)entry_count;
-            for (int i = 0; i < count; i++) { items[i] = entries[i].name; disabled[i] = !entries[i].supported; }
-            if (!count) { count = 1; items[0] = "No compatible boot entries found"; disabled[0] = 1; }
             break;
         case STEP_FINISH:
-            if (installed)
-            {
-                snprintf(title, sizeof(title), "Setup complete");
-                snprintf(description, sizeof(description), "Reboot into Hekate and select the Autorun boot entry, "
-                         "then open Autorun from the HOME Menu.");
-                notice = "Restart uses the console's configured reboot target. If Hekate does not appear, enter it using your usual method.";
-                items[0] = "Restart console";
-                notes[0] = "Select the Autorun boot entry in Hekate";
-            }
-            else
-            {
-                snprintf(description, sizeof(description), "Boot entry: %s\nLoader: %s\nOverclock settings: %s",
-                         job.boot.entry.name, job.boot.loader == SETUP_BOOT_HOC ? "HOC" : "Stock Atmosphere",
-                         job.boot.loader != SETUP_BOOT_HOC ? "Not changed" : job.boot.preserve_hoc ? "Preserve existing" : "Bundled defaults");
-                notice = manifest ? "Leave the SD card connected until installation finishes." :
-                         "Patch files are not bundled yet. No boot files have been changed. Return to Quick setup when they are available.";
-                items[0] = updating ? "Update boot patches" : "Install boot patches";
-                disabled[0] = !manifest;
-                notes[0] = updating ? "Replace the existing Autorun boot entry" : "Verify files and create the Autorun boot entry";
-            }
+            snprintf(title, sizeof(title), "Setup complete");
+            snprintf(description, sizeof(description), "Autorun is ready. Add a game with + and start it with A.");
+            items[0] = "Done";
+            notes[0] = "Open the library";
             break;
         }
         if (selected >= count) selected = count - 1;
@@ -281,9 +157,8 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
             if (input.button == UI_B)
             {
                 ui_sound(ui, LAUNCHER_SOUND_BACK);
-                if (installed) { result = 1; goto done; }
                 if (!step) goto done;
-                step -= step == STEP_MESOSPHERE && job.boot.loader == SETUP_BOOT_STOCK ? 2 : 1;
+                step--;
                 break;
             }
             if (input.button == UI_UP && selected) { selected--; ui_sound(ui, LAUNCHER_SOUND_MOVE); }
@@ -297,7 +172,7 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
         }
         if (step != previous)
         {
-            selected = step == STEP_LOADER && updating && installed_loader == SETUP_BOOT_HOC ? 1 : 0;
+            selected = 0;
             top = 0;
             ui_start_screen(ui);
             continue;
@@ -310,69 +185,30 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
             case STEP_FORWARDER:
                 if (!forwarder)
                 {
-                    job.forwarder = 1;
-                    if (!confirm_install(ui, options) || !run_job(ui, &job)) break;
+                    job.forwarder = 39;
+                    if (!confirm_install(ui, options, "Autorun") || !run_job(ui, &job)) break;
                     forwarder = 1;
                 }
                 step = STEP_DLLS;
                 break;
             case STEP_DLLS:
                 /* Downloading moves on once the card has them; skipping moves on as it is. */
-                if (dlls_ready || selected || launcher_dlls_install(dlls)) step = STEP_LOADER;
+                if (dlls_ready || selected || launcher_dlls_install(dlls)) step = STEP_32BIT;
                 break;
-            case STEP_LOADER:
-                if (selected == 2)
+            case STEP_32BIT:
+                if (!have_32bit && !selected)
                 {
-                    int have = options->title_installed && options->title_installed(options->forwarder_32bit_id);
-                    if (!have)
-                    {
-                        job.forwarder = 32;
-                        if (!confirm_install(ui, options) || !run_job(ui, &job)) break;
-                    }
-                    ui_message(ui, "Setup complete", "Autorun 32-bit is on the HOME menu. Games linked for a "
-                               "fixed low address open there by themselves; every other game starts here. "
-                               "Atmosphere and the boot files were not changed.");
-                    result = 1;
-                    goto done;
+                    job.forwarder = 32;
+                    if (!confirm_install(ui, options, "Autorun 32-bit") || !run_job(ui, &job)) break;
+                    have_32bit = 1;
                 }
-                job.boot.loader = selected ? SETUP_BOOT_HOC : SETUP_BOOT_STOCK;
-                if (!selected) job.boot.preserve_hoc = 0;
-                step = selected ? STEP_OVERCLOCK : STEP_MESOSPHERE;
+                step = STEP_FINISH;
                 break;
-            case STEP_OVERCLOCK:
-                job.boot.preserve_hoc = !selected;
-                if (job.boot.preserve_hoc) snprintf(job.boot.hoc_source, sizeof(job.boot.hoc_source), "%s", hoc.path);
-                else job.boot.hoc_source[0] = 0;
-                step = STEP_MESOSPHERE;
-                break;
-            case STEP_MESOSPHERE: step = STEP_ENTRY; break;
-            case STEP_ENTRY:
-            {
-                int atmosphere_match = running_atmosphere_matches(manifest);
-                if (manifest && atmosphere_match < 0)
-                    ui_message(ui, "Atmosphere version unavailable", "Could not verify the running Atmosphere version. Boot an Atmosphere 1.11.2 entry before installing patches.");
-                else if (manifest && !atmosphere_match)
-                    ui_message(ui, "Atmosphere version mismatch", "The running Atmosphere version is not 1.11.2. Update Atmosphere and reboot first.");
-                else { job.boot.entry = entries[selected]; step = STEP_FINISH; }
-                break;
-            }
             case STEP_FINISH:
-                if (installed)
-                {
-                    if (ui_confirm(ui, "Restart console?", "Autorun will close and restart the console.", "Restart"))
-                    { result = 2; goto done; }
-                }
-                else if (ui_confirm(ui, updating ? "Update boot patches?" : "Install boot patches?",
-                                    updating ? "The Autorun boot entry and its patches will be updated." :
-                                               "A separate Autorun boot entry will be added. Your existing boot entry will be kept.",
-                                    updating ? "Update" : "Install"))
-                {
-                    job.forwarder = 0;
-                    if (run_job(ui, &job)) installed = 1;
-                }
-                break;
+                result = 1;
+                goto done;
             }
-            selected = step == STEP_LOADER && updating && installed_loader == SETUP_BOOT_HOC ? 1 : 0;
+            selected = 0;
             top = 0;
             ui_start_screen(ui);
             continue;
@@ -428,7 +264,7 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
                         138, steps[i], color, 0);
         }
         ui_text_fit(ui, ui->large, 424, 202, 664, title, ui->value, 0);
-        ui_text_wrapped(ui, ui->small, 424, 252, 652, step == STEP_ENTRY ? 5 : 4, description, ui->text, 0);
+        ui_text_wrapped(ui, ui->small, 424, 252, 652, 4, description, ui->text, 0);
         if (notice)
         {
             ui_rounded(ui, 420, 352, 668, 68, 12, (SDL_Color){30, 40, 42, 255});
@@ -445,16 +281,8 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
                         disabled[i] ? ui->dim : ui->value, i == selected);
             if (notes[i]) ui_text_fit(ui, ui->small, 438, y + 36, 628, notes[i], ui->dim, 0);
         }
-        if (step == STEP_ENTRY && entry_count && !entries[selected].supported)
-            ui_text_fit(ui, ui->small, 424, 581, 664, entries[selected].reason, ui->danger, 1);
-        else if (count > 4)
         {
-            char position[32];
-            snprintf(position, sizeof(position), "%d / %d", selected + 1, count);
-            ui_text_right(ui, ui->small, 1088, 581, position, ui->dim);
-        }
-        {
-            const struct ui_hint hints[] = { {UI_B, step && !installed ? "Back" : "Close"}, {UI_A, "Continue"} };
+            const struct ui_hint hints[] = { {UI_B, step ? "Back" : "Close"}, {UI_A, "Continue"} };
             ui_fill(ui, 192, 608, 896, 1, (SDL_Color){236, 240, 246, 24});
             ui_hints_right(ui, hints, 2, 1088, 630);
         }
@@ -462,12 +290,7 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
         ui_present(ui);
         ui_wait(ui);
     }
-    result = installed;
 done:
-    free(entries);
-#ifdef __SWITCH__
-    if (romfs_mounted) romfsExit();
-#endif
     ui_start_screen(ui);
     return result;
 }

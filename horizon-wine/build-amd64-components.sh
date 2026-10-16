@@ -3,7 +3,6 @@ set -eu
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 pe="${WINE_NX_PE_BUILD_DIR:-$root/horizon-wine/build-wine-amd64-pe}"
 build="${WINE_NX_BUILD_DIR:-$root/horizon-wine/build-switch-amd64}"
-boot_bundle="${WINE_NX_BOOT_BUNDLE_DIR:-$root/horizon-wine/toolchains/boot-payloads/bundle}"
 jobs="${WINE_NX_JOBS:-8}"
 fex=OFF
 case "${WINE_NX_FEX:-0}" in
@@ -24,16 +23,6 @@ pe="$(CDPATH= cd -- "$pe" && pwd)"
 build="$(CDPATH= cd -- "$build" && pwd)"
 case "$pe" in "$root"/*) ;; *) echo "PE build must be inside the Wine checkout." >&2; exit 1;; esac
 case "$build" in "$root"/*) ;; *) echo "Switch build must be inside the Wine checkout." >&2; exit 1;; esac
-if [ -f "$boot_bundle/setup_boot_manifest.h" ]; then
-    boot_bundle="$(CDPATH= cd -- "$boot_bundle" && pwd)"
-    case "$boot_bundle" in "$root"/*) ;; *) echo "Boot bundle must be inside the Wine checkout." >&2; exit 1;; esac
-    boot_bundle="/work/${boot_bundle#"$root"/}"
-elif [ -n "${WINE_NX_BOOT_BUNDLE_DIR:-}" ]; then
-    echo "Boot bundle is incomplete: $boot_bundle" >&2
-    exit 1
-else
-    boot_bundle=""
-fi
 (
     cd "$pe"
     "$root/configure" --enable-archs=aarch64,arm64ec,i386 \
@@ -51,14 +40,14 @@ docker run --rm --network none -v "$root:/work" -w /work \
     -e NX_PE="/work/${pe#"$root/"}" -e NX_BUILD="/work/${build#"$root/"}" \
     -e NX_JOBS="$jobs" -e NX_DYNAREC="${WINE_NX_BOX64_DYNAREC:-ON}" \
     -e WINE_NX_JOBS="$jobs" \
-    -e NX_MESA="${WINE_NX_MESA_SWITCH_DIR:-}" -e NX_FEX="$fex" -e NX_BOOT_BUNDLE="$boot_bundle" \
+    -e NX_MESA="${WINE_NX_MESA_SWITCH_DIR:-}" -e NX_FEX="$fex" \
     "${WINE_NX_DEVKIT_IMAGE:-$(cat "$root/horizon-wine/switch-dev.txt")}" sh -ec '
     cmake -S horizon-wine -B "$NX_BUILD" -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE=/work/horizon-wine/cmake/switch-devkitA64.cmake \
         -DWINE_NX_PE_BUILD_DIR="$NX_PE" -DWINE_NX_AMD64=ON -DWINE_NX_FEX="$NX_FEX" \
         -DWINE_NX_BOX64_INTERPRETER=ON -DWINE_NX_BOX64_DYNAREC="$NX_DYNAREC" \
         ${NX_MESA:+-DWINE_NX_MESA_SWITCH_DIR="$NX_MESA"} -DWINE_NX_USB_STORAGE=ON \
-        -DWINE_NX_BOOT_BUNDLE="$NX_BOOT_BUNDLE" -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_BUILD_TYPE=Release
     cmake --build "$NX_BUILD" --target wine-nx-runtime-nro -j "$NX_JOBS"
     '
 # The Windows modules this runtime runs -- system32, syswow64, FEX's CPU modules,
