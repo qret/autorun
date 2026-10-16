@@ -188,8 +188,8 @@ struct launcher_settings
     int fex;
     int four_cores;
     /* What the program needs of the address space (launcher_catalog.h): -1 read it
-     * from the program's own header, 0 any, 1 the low 4 GB of Autorun 32-bit, 2 the
-     * low addresses through the alias window of the 39-bit process (Box64 only). */
+     * from the program's own header (a fixed-low one takes the alias window where
+     * there is one), 0 any, 1 the low 4 GB of Autorun 32-bit. */
     int address_space;
     int lazy_file_views;  /* views of files read from the card on demand */
     int framebuffer;  /* 1: windows go to the framebuffer, 0: through the compositor */
