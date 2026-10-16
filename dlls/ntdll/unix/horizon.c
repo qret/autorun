@@ -3647,7 +3647,19 @@ struct horizon_mapping
 #ifdef WINE_NX_SWAP_POC
     unsigned char swap_unmapped, swap_managed, swap_excluded;
 #endif
+    /* A reservation that stands for a read-only view of a file, read on demand
+     * (horizon_lazy_file_view_wanted): where its first byte comes from. */
+    struct horizon_file_source *file;
+    off_t file_offset;
     struct rb_entry entry;
+};
+
+/* The file behind lazily read views, shared by every piece a view is split into
+ * and closed with the last of them. Only touched under mapping_mutex. */
+struct horizon_file_source
+{
+    int fd;
+    unsigned int refs;
 };
 
 #include "horizon_pool.h"
@@ -3840,13 +3852,15 @@ static void alias_source_report( const void *addr, char *buffer, size_t size )
     snprintf( buffer + len, size - len, " alias=none" );
 }
 
+extern unsigned int horizon_lazy_file_views, horizon_lazy_file_chunks;
+
 void horizon_memory_pool_stats( char *buffer, size_t size )
 {
     pthread_mutex_lock( &mapping_mutex );
     pthread_mutex_lock( &section_pages_mutex );
     snprintf( buffer, size, "[MEMPOOL] arena_mb=%u arena_peak_mb=%u arena_reclaims=%llu pooled_allocs=%llu"
               " block_allocs=%llu shared_allocs=%llu backing_slots=%zu mapping_slots=%zu section_views=%llu"
-              " anchors=%u anchor_mb=%llu section_failures=%u",
+              " anchors=%u anchor_mb=%llu section_failures=%u file_views_on_demand=%u file_chunks_read=%u",
               (backing_pages.active_arenas + section_pages.active_arenas) * 2,
               (backing_pages.peak_arenas + section_pages.peak_arenas) * 2,
               backing_pages.reclaims + section_pages.reclaims,
@@ -3854,7 +3868,7 @@ void horizon_memory_pool_stats( char *buffer, size_t size )
               backing_pages.blocks + section_pages.blocks,
               backing_pages.shared + section_pages.shared,
               backing_pool.used, mapping_pool.used, section_view_maps, section_anchors,
-              section_anchor_bytes >> 20, section_failures );
+              section_anchor_bytes >> 20, section_failures, horizon_lazy_file_views, horizon_lazy_file_chunks );
     pthread_mutex_unlock( &section_pages_mutex );
     pthread_mutex_unlock( &mapping_mutex );
 }
@@ -18126,6 +18140,34 @@ static struct horizon_mapping *alloc_mapping( void *addr, size_t size, struct ho
     return mapping;
 }
 
+static struct horizon_file_source *file_source_ref( struct horizon_file_source *source )
+{
+    if (source) source->refs++;
+    return source;
+}
+
+static void file_source_release( struct horizon_file_source *source )
+{
+    if (!source || --source->refs) return;
+    close( source->fd );
+    free( source );
+}
+
+/* A piece of a view read on demand takes the file and its own offset in it. */
+static void inherit_file_source( struct horizon_mapping *piece, const struct horizon_mapping *from )
+{
+    if (!piece || !from->file) return;
+    piece->file = file_source_ref( from->file );
+    piece->file_offset = from->file_offset + ((char *)piece->addr - (char *)from->addr);
+}
+
+static void free_mapping( struct horizon_mapping *mapping )
+{
+    if (!mapping) return;
+    file_source_release( mapping->file );
+    horizon_object_free( &mapping_pool, mapping );
+}
+
 static VirtmemReservation *reserve_fixed_range_locked( void *addr, size_t size )
 {
     VirtmemReservation *reservation = virtmemAddReservation( addr, size );
@@ -18998,6 +19040,7 @@ static int replace_reservation_mapping( struct horizon_mapping *mapping, char *s
             errno = ENOMEM;
             goto failed;
         }
+        inherit_file_source( left, mapping );
     }
 
     if (end < mapping_end)
@@ -19011,10 +19054,20 @@ static int replace_reservation_mapping( struct horizon_mapping *mapping, char *s
             errno = ENOMEM;
             goto failed;
         }
+        inherit_file_source( right, mapping );
     }
 
     list_remove_mapping( mapping );
-    if (map_range && map_backing_at( start, size, prot, -1, 0, MAP_PRIVATE | MAP_ANON, EINVAL ))
+    /* A view read on demand is filled from its file, into a private copy: the
+     * file is never written through it (horizon_lazy_file_view_wanted). */
+    if (map_range && mapping->file &&
+        map_backing_at( start, size, prot, mapping->file->fd,
+                        mapping->file_offset + (start - mapping_start), MAP_PRIVATE, EINVAL ))
+    {
+        list_add_mapping( mapping );
+        goto failed;
+    }
+    if (map_range && !mapping->file && map_backing_at( start, size, prot, -1, 0, MAP_PRIVATE | MAP_ANON, EINVAL ))
     {
         /* Keep the original reservation and tree entry on a failed commit.
          * Releasing them here turns a retry into an unrecoverable hole. */
@@ -19034,7 +19087,7 @@ static int replace_reservation_mapping( struct horizon_mapping *mapping, char *s
     if (left) list_add_mapping( left );
     if (right) list_add_mapping( right );
     remove_reservation( mapping->reservation );
-    horizon_object_free( &mapping_pool, mapping );
+    free_mapping( mapping );
     return 0;
 
 failed:
@@ -19042,12 +19095,12 @@ failed:
     if (right)
     {
         remove_reservation( right->reservation );
-        horizon_object_free( &mapping_pool, right );
+        free_mapping( right );
     }
     if (left)
     {
         remove_reservation( left->reservation );
-        horizon_object_free( &mapping_pool, left );
+        free_mapping( left );
     }
     errno = saved_errno;
     return -1;
@@ -19097,6 +19150,9 @@ static int protect_reservation_mapping( struct horizon_mapping *mapping, char *s
     if (end < mapping_end &&
         !(right = reservation_mapping_piece( end, mapping_end - end, mapping->prot )))
         goto failed;
+    inherit_file_source( left, mapping );
+    inherit_file_source( middle, mapping );
+    inherit_file_source( right, mapping );
 
 #ifdef WINE_NX_SWAP_POC
     if (left) { left->swap_managed = mapping->swap_managed; left->swap_excluded = mapping->swap_excluded; }
@@ -19109,7 +19165,7 @@ static int protect_reservation_mapping( struct horizon_mapping *mapping, char *s
     list_add_mapping( middle );
     if (right) list_add_mapping( right );
     remove_reservation( mapping->reservation );
-    horizon_object_free( &mapping_pool, mapping );
+    free_mapping( mapping );
     return 0;
 
 failed:
@@ -19117,17 +19173,17 @@ failed:
     if (right)
     {
         remove_reservation( right->reservation );
-        horizon_object_free( &mapping_pool, right );
+        free_mapping( right );
     }
     if (middle)
     {
         remove_reservation( middle->reservation );
-        horizon_object_free( &mapping_pool, middle );
+        free_mapping( middle );
     }
     if (left)
     {
         remove_reservation( left->reservation );
-        horizon_object_free( &mapping_pool, left );
+        free_mapping( left );
     }
     errno = saved_errno;
     return -1;
@@ -19156,7 +19212,7 @@ static int split_backing_mapping( struct horizon_mapping *mapping, char *start, 
         if (left)
         {
             release_backing( left->backing );
-            horizon_object_free( &mapping_pool, left );
+            free_mapping( left );
         }
         return -1;
     }
@@ -19172,12 +19228,12 @@ static int split_backing_mapping( struct horizon_mapping *mapping, char *start, 
         if (left)
         {
             release_backing( left->backing );
-            horizon_object_free( &mapping_pool, left );
+            free_mapping( left );
         }
         if (right)
         {
             release_backing( right->backing );
-            horizon_object_free( &mapping_pool, right );
+            free_mapping( right );
         }
         return -1;
     }
@@ -19188,7 +19244,7 @@ static int split_backing_mapping( struct horizon_mapping *mapping, char *start, 
     if (right) list_add_mapping( right );
 
     release_backing( mapping->backing );
-    horizon_object_free( &mapping_pool, mapping );
+    free_mapping( mapping );
     return 0;
 }
 
@@ -19230,24 +19286,24 @@ static struct horizon_mapping *split_backing_mapping_metadata( struct horizon_ma
     if (right) list_add_mapping( right );
     list_add_mapping( middle );
     release_backing( mapping->backing );
-    horizon_object_free( &mapping_pool, mapping );
+    free_mapping( mapping );
     return middle;
 
 failed:
     if (left)
     {
         release_backing( left->backing );
-        horizon_object_free( &mapping_pool, left );
+        free_mapping( left );
     }
     if (middle)
     {
         release_backing( middle->backing );
-        horizon_object_free( &mapping_pool, middle );
+        free_mapping( middle );
     }
     if (right)
     {
         release_backing( right->backing );
-        horizon_object_free( &mapping_pool, right );
+        free_mapping( right );
     }
     errno = ENOMEM;
     return NULL;
@@ -19803,7 +19859,7 @@ void horizon_release_native_code( void *token )
     {
         list_remove_mapping( mapping );
         remove_reservation( mapping->reservation );
-        horizon_object_free( &mapping_pool, mapping );
+        free_mapping( mapping );
     }
     pthread_mutex_unlock( &mapping_mutex );
     if (code->view) virtual_free_horizon_native( code->view );
@@ -19839,7 +19895,7 @@ static void *horizon_section_anchor( void *source, size_t size, void **token )
         const int saved_errno = errno;
 
         if (reservation) remove_reservation( reservation );
-        horizon_object_free( &mapping_pool, mapping );
+        free_mapping( mapping );
         section_failure( "anchor", addr, source, size, saved_errno );
         errno = saved_errno;
         return NULL;
@@ -19864,7 +19920,7 @@ static int horizon_section_unanchor( void *addr, void *source, size_t size, void
     }
     list_remove_mapping( mapping );
     if (mapping->reservation) remove_reservation( mapping->reservation );
-    horizon_object_free( &mapping_pool, mapping );
+    free_mapping( mapping );
     section_anchors--;
     section_anchor_bytes -= size;
     return 0;
@@ -19932,7 +19988,7 @@ static void free_section_range( struct horizon_mapping *mapping )
     if (mapping->section_state == SECTION_ALIASED)
         horizon_memfile_use( mapping->section, mapping->section_offset, mapping->size, -1 );
     horizon_memfile_unref( mapping->section );
-    horizon_object_free( &mapping_pool, mapping );
+    free_mapping( mapping );
 }
 
 /* A piece of a range being split, reserved on its own. An aliased piece of an
@@ -20312,6 +20368,67 @@ static int add_lazy_mapping_locked( void *start, size_t size, int prot )
     return 0;
 }
 
+/* Views of files read on demand. Horizon has no page cache, so a view of a file
+ * is a copy, and the copy was read from the card whole when the view was made.
+ * Ragnarok Online clients map their GRF archives -- gigabytes, mostly textures
+ * a session never draws -- through views of several megabytes each and read a
+ * few kilobytes out of each one: the card gave eleven gigabytes for the 29 MB
+ * the client read through ReadFile, and that was two and a half minutes of a
+ * four-and-a-half-minute start. A view read on demand is a reservation, as
+ * large anonymous mappings are (add_lazy_mapping_locked), that remembers its
+ * file; the first touch of a chunk reads that chunk alone into a private copy.
+ *
+ * Only views nothing can write through, of a real file, and large enough to be
+ * worth it: a write would have to reach the file, and a small view is read
+ * about as fast whole. The runtime turns it on per program
+ * (wine_nx_lazy_file_views), since a program that hands a view's address to a
+ * system call, which reads it without faulting, would see pages not read yet. */
+int wine_nx_lazy_file_views;
+#define HORIZON_LAZY_FILE_VIEW_MIN   ((size_t)1024 * 1024)
+#define HORIZON_LAZY_FILE_VIEW_CHUNK ((size_t)512 * 1024)
+unsigned int horizon_lazy_file_views, horizon_lazy_file_chunks;
+
+static BOOL horizon_lazy_file_view_wanted( int fd, size_t size, int prot )
+{
+    return wine_nx_lazy_file_views && fd != -1 && size >= HORIZON_LAZY_FILE_VIEW_MIN &&
+           !(prot & (PROT_WRITE | PROT_EXEC)) && (prot & PROT_READ) && !horizon_memfile_from_fd( fd );
+}
+
+static int add_lazy_file_mapping_locked( void *start, size_t size, int prot, int fd, off_t offset )
+{
+    struct horizon_file_source *source;
+    struct horizon_mapping *mapping;
+
+    if (!(source = malloc( sizeof(*source) )))
+    {
+        errno = ENOMEM;
+        return -1;
+    }
+    if ((source->fd = dup( fd )) == -1)
+    {
+        int saved_errno = errno;
+
+        free( source );
+        errno = saved_errno;
+        return -1;
+    }
+    source->refs = 1;
+    if (add_reservation_mapping_locked( start, size ))
+    {
+        int saved_errno = errno;
+
+        file_source_release( source );
+        errno = saved_errno;
+        return -1;
+    }
+    mapping = find_overlap_mapping( start, size );
+    mapping->prot = prot;
+    mapping->file = source;
+    mapping->file_offset = offset;
+    horizon_lazy_file_views++;
+    return 0;
+}
+
 #ifdef WINE_NX_SWAP_POC
 static int swap_resident_locked( const void *addr, size_t size )
 {
@@ -20373,7 +20490,7 @@ static BOOL horizon_commit_lazy_fault( unsigned long long address, unsigned int 
     int needed, saved_errno = errno;
     struct horizon_mapping *mapping;
     char *chunk_start, *chunk_end, *mapping_start, *mapping_end;
-    BOOL handled = FALSE;
+    BOOL handled = FALSE, from_file;
 
     if ((exception_class != 0x20 && exception_class != 0x21 &&
          exception_class != 0x24 && exception_class != 0x25) ||
@@ -20398,13 +20515,23 @@ static BOOL horizon_commit_lazy_fault( unsigned long long address, unsigned int 
 
     mapping_start = mapping->addr;
     mapping_end = mapping_start + mapping->size;
-    chunk_start = (char *)((uintptr_t)address & ~(uintptr_t)(HORIZON_LAZY_MAPPING_CHUNK - 1));
-    chunk_end = chunk_start + HORIZON_LAZY_MAPPING_CHUNK;
+    {
+        /* A view of a file reads less at a time: every byte of a chunk comes
+         * from the card, where an anonymous chunk is only zeroed. */
+        size_t chunk = mapping->file ? HORIZON_LAZY_FILE_VIEW_CHUNK : HORIZON_LAZY_MAPPING_CHUNK;
+
+        chunk_start = (char *)((uintptr_t)address & ~(uintptr_t)(chunk - 1));
+        chunk_end = chunk_start + chunk;
+    }
     if (chunk_start < mapping_start) chunk_start = mapping_start;
     if (chunk_end > mapping_end || chunk_end < chunk_start) chunk_end = mapping_end;
+    from_file = mapping->file != NULL;  /* the mapping is gone once replaced */
     if (!replace_reservation_mapping( mapping, chunk_start, chunk_end - chunk_start,
                                        mapping->prot, TRUE ))
+    {
         handled = TRUE;
+        if (from_file) horizon_lazy_file_chunks++;
+    }
     else
     {
         unsigned int count = __atomic_add_fetch( &failures, 1, __ATOMIC_RELAXED );
@@ -20568,6 +20695,16 @@ static void *horizon_mmap_fixed( void *start, size_t size, int prot, int flags, 
         stage = "reserve demand-backed range";
         virtmemLock();
         ret = add_lazy_mapping_locked( start, size, prot );
+        virtmemUnlock();
+        if (ret) start = MAP_FAILED;
+    }
+    else if (horizon_lazy_file_view_wanted( fd, size, prot ))
+    {
+        int ret;
+
+        stage = "reserve file view read on demand";
+        virtmemLock();
+        ret = add_lazy_file_mapping_locked( start, size, prot, fd, offset );
         virtmemUnlock();
         if (ret) start = MAP_FAILED;
     }
