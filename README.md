@@ -35,6 +35,56 @@ copies to the SD card and start them from Autorun's library.
 
 ![The Autorun launcher](documentation/launcher.jpg)
 
+## Not a piracy or circumvention tool
+
+Autorun runs **your own copies** of PC games. It doesn't include, download or
+link to any game, and it doesn't remove or get around copy protection, DRM or
+license checks.
+
+Some games do get small changes so they can start at all, and here is why.
+Autorun runs Wine inside **a single process** on the Switch: one Windows
+program at a time, with everything Wine needs (its server, its registry, its
+windows) inside that one homebrew app. Horizon gives a homebrew app no way to
+start a second program beside itself. Many PC games start through a second
+program: a launcher that checks your hardware, writes a settings file and then
+starts the real game, or a store's front end that starts it and waits. On a PC
+that hop is invisible. On the Switch the second program can't start next to
+the first, and the game just closes. So Autorun, and its
+[game fixes](https://github.com/autorunhq/autorun-game-fixes), take the hop out:
+
+- the settings file the launcher would have written is written for it;
+- the arguments the launcher would have passed are passed;
+- where a game insists on handing itself over to its launcher, the runtime
+  skips that one call, in memory, so the game starts directly.
+
+Nothing else in the game is changed, and its own checks run as they always do.
+
+There are two kinds of launcher, and only the first can be handled this way.
+One starts the game and goes away: that hop is what's taken out above. The
+other has to **keep running beside the game** for as long as it plays: a
+store's client such as Steam, the EA app or Ubisoft Connect, which the game
+keeps asking whether you own it, and where its overlay and cloud saves come
+from. Autorun can't leave a process running like that: there is only the
+game's. A game that needs one doesn't start on Autorun as it is, and Autorun
+doesn't fake the store's answer. Some players set up their original copy to
+start without its client; Autorun doesn't include, link to or support a tool
+for that, and doing it is their own decision and responsibility, only ever for
+a copy they bought. Games with online sign-in or anti-cheat are out of reach
+the same way.
+
+> **No support for pirated, cracked or modified games.** Issues, forum threads
+> and logs that come from them are closed without an answer, and links to them
+> removed. Autorun and its fixes are made and tested for legitimate,
+> unmodified copies.
+
+> **No support for third-party bundles.** Downloads that ship a game already
+> packed with Autorun as its environment ("ready to play" packs of a game,
+> Autorun and its settings in one archive) aren't made by this project, and we
+> don't support or endorse them. They usually carry a game shared without its
+> publisher's permission, and often an old or modified Autorun. Get Autorun only
+> from its [releases](https://github.com/autorunhq/autorun/releases), and put
+> your own copy of the game on the card yourself.
+
 ## What you need
 
 - A Nintendo Switch with custom firmware (Atmosphère) that can run homebrew.
@@ -176,7 +226,10 @@ detail, at some speed cost.
 - Speed: demanding 3D games are limited by translating the game's code on the
   fly, more than by the graphics chip.
 - Memory: games share the Switch's 4 GB with the system; big games can run out.
-- One game at a time, one controller.
+- One program at a time, one controller. Wine runs as a single process, so a
+  game that starts through a launcher needs a fix to skip it, and one that
+  needs another program running beside it (a store's client, anti-cheat)
+  doesn't run.
 - A game may need Windows files the card doesn't have yet; the log names them.
 
 ## For developers
