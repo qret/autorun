@@ -502,6 +502,10 @@ function(wine_nx_add_box64_core target)
     wine_nx_box64_patch(native_source "block->hash = X31_hash_code((void*)block->x64_readaddr, block->x64_size);"
         "block->hash = X31_hash_code((void*)WINE_NX_WINDOW_HOST(block->x64_readaddr), block->x64_size);"
         "hash a new block through the alias window")
+    # is_nops peeks ahead for padding while a block is built (seen on hardware as
+    # thousands of native accesses served in the window, all from it).
+    wine_nx_box64_patch(native_source "#define PK(A) (*((uint8_t*)(addr+(A))))"
+        "#define PK(A) (*((uint8_t*)WINE_NX_WINDOW_HOST(addr+(A))))" "is_nops code peek")
     string(PREPEND native_source "${WINE_NX_BOX64_WINDOW_HOST}")
     set(native_generated "${CMAKE_CURRENT_BINARY_DIR}/${target}-dynarec_native.c")
     file(WRITE "${native_generated}" "${native_source}")
