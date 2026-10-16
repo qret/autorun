@@ -113,6 +113,16 @@ fail0:
     }
 }
 
+// The 96 MiB nx-hbloader leaves outside the heap.
+#define HB_HEAP_MARGIN 0x6000000
+
+static bool is32BitAddressSpace(void) {
+    u64 base = 0, size = 0;
+    return R_SUCCEEDED(svcGetInfo(&base, InfoType_AslrRegionAddress, CUR_PROCESS_HANDLE, 0)) &&
+           R_SUCCEEDED(svcGetInfo(&size, InfoType_AslrRegionSize, CUR_PROCESS_HANDLE, 0)) &&
+           size && base + size <= 0x100000000ull;
+}
+
 static u64 calculateMaxHeapSize(void) {
     u64 size = 0;
     u64 mem_available = 0, mem_used = 0;
@@ -124,8 +134,12 @@ static u64 calculateMaxHeapSize(void) {
         size = (mem_available - mem_used - 0x200000) & ~0x1FFFFF;
     if (size == 0)
         size = 0x2000000*16;
-    if (size > 0x6000000)
-        size -= 0x6000000;
+    // A 32-bit process is held to 2 GiB, and a fixed-address game came to its
+    // title screen with 74 MB left, so there the margin is memory the game
+    // needs. Thread stacks, transfer memory and code memory all come out of
+    // the heap; libnx sets up its own heap with only the 2 MiB taken above.
+    if (size > HB_HEAP_MARGIN && !is32BitAddressSpace())
+        size -= HB_HEAP_MARGIN;
 
     // A 32-bit address space has a 2 GiB heap region, less than the memory
     // an application is given, and the kernel refuses a heap larger than it.
@@ -141,6 +155,13 @@ static void setupHbHeap(void) {
     void* addr = NULL;
     u64 size = calculateMaxHeapSize();
     Result rc = svcSetHeapSize(&addr, size);
+
+    // Without the margin the size can sit at the edge of what the kernel
+    // grants; step back to it 2 MiB at a time rather than abort.
+    for (u64 given = 0; R_FAILED(rc) && given < HB_HEAP_MARGIN && size > 0x200000; given += 0x200000) {
+        size -= 0x200000;
+        rc = svcSetHeapSize(&addr, size);
+    }
 
     if (R_FAILED(rc) || addr==NULL)
         diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 9));
