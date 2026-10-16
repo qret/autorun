@@ -557,10 +557,15 @@ void __stdcall start(void)
     {
         /* static: -nostdlib has no stack probe, and these on the stack take
          * this function's frame past the 4 KB one would be emitted for. */
-        static WCHAR above[MAX_PATH], named[MAX_PATH];
-        unsigned int best = 0;
+        static WCHAR above[MAX_PATH], named[MAX_PATH], given[MAX_PATH], pack[MAX_PATH];
+        unsigned int best = 0, n;
 
         game[0] = 0;
+        /* The folder Autorun ran the game from, when it runs this before the
+         * game (runtime.c, run_game_setup_first): <collection>\<pack>\TSBin. */
+        if ((n = GetEnvironmentVariableW( L"WINE_NX_GAME_FOLDER", given, MAX_PATH )) && n < MAX_PATH &&
+            parent_folder( given, pack, MAX_PATH ) && parent_folder( pack, named, MAX_PATH ))
+            consider( named, game, &best, MAX_PATH );
         consider( setup_folder, game, &best, MAX_PATH );
         if (parent_folder( setup_folder, above, MAX_PATH ))
         {

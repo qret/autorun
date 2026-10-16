@@ -10,6 +10,7 @@
 #include <malloc.h>
 #include <string.h>
 #include <strings.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -1806,7 +1807,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     chars += strlen( dos_path ) + 1;
     chars += strlen( nt_path ) + 1;
     chars += sizeof(runtime_environment) + 2 * strlen( graphics_path ) + strlen( dxvk_hud ) - 1;
-    chars += fex_environment_size;
+    chars += fex_environment_size + runtime_extra_environment_size;
     size = sizeof(*params) + chars * sizeof(WCHAR);
 
     if (!(params = calloc( 1, size ))) return NULL;
@@ -1853,6 +1854,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
         do *cursor++ = (unsigned char)*value; while (*value++);
     }
     for (i = 0; i < fex_environment_size; i++) *cursor++ = (unsigned char)fex_environment[i];
+    for (i = 0; i < runtime_extra_environment_size; i++) *cursor++ = (unsigned char)runtime_extra_environment[i];
     *cursor++ = 0;
     params->EnvironmentSize = (cursor - (WCHAR *)params->Environment) * sizeof(WCHAR);
 
@@ -3230,6 +3232,33 @@ static void release_thread_local_pages( void )
 #define COMPONENTS_DONE    WINE_NX_RUNTIME_ROOT "/registry/components-1.done"
 static int runtime_components_run;
 
+/* Games whose own setup (tools/*_setup.c, shipped under drive_c) writes what
+ * their installer would have: run once before the game, for the folder the
+ * game is in now -- a game moved elsewhere has it run again, since the paths it
+ * wrote changed with it. As with the components setup, the setup takes the
+ * game's place and the game waits in run-next.txt; the setup is told the
+ * game's folder in WINE_NX_GAME_FOLDER. A new game is a new row here (and its
+ * setup in tools/ and package-autorun.py); docs/ARCHITECTURE.md has the rest. */
+static const struct runtime_game_setup
+{
+    const char *id;
+    const char *exe;      /* the program started, any case */
+    const char *beside;   /* a file or folder beside it ("../" is the folder above) that makes it the game */
+    const char *setup;    /* under drive_c */
+    unsigned int version; /* raised when the setup writes something new */
+} runtime_game_setups[] =
+{
+    { "war3",  "war3.exe",          "Game.dll",  "WarCraft III Setup/war3-setup.exe", 1 },
+    { "war3",  "Frozen Throne.exe", "Game.dll",  "WarCraft III Setup/war3-setup.exe", 1 },
+    { "gh3",   "GH3.exe",           "AWL.dll",   "Guitar Hero III/gh3-setup.exe",     1 },
+    { "sims2", "Sims2EP9.exe",      "../TSData", "The Sims 2 Setup/sims2-setup.exe",  1 },
+};
+static int runtime_game_setup_run;
+static char runtime_game_setup_done[192];
+/* Added to the program's environment (runtime_create_process_params). */
+static char runtime_extra_environment[720];
+static size_t runtime_extra_environment_size;
+
 /* The exit code the program gave NtTerminateProcess (dlls/ntdll/unix/process.c);
  * ~0 while it has not ended by itself. */
 unsigned int wine_nx_program_exit_code = ~0u;
@@ -3259,6 +3288,83 @@ static void run_components_first( char *target, size_t size )
               name ? name + 1 : target );
     snprintf( target, size, "%s", COMPONENTS_SETUP );
     runtime_components_run = 1;
+}
+
+/* The row of runtime_game_setups the program is, with the game's folder. */
+static const struct runtime_game_setup *runtime_match_game_setup( const char *target, char *folder, size_t size )
+{
+    const char *name = path_basename( target );
+    size_t len = name - target, i;
+    char probe[800];
+    struct stat st;
+
+    if (len < 2 || len > size) return NULL;
+    for (i = 0; i < ARRAY_SIZE(runtime_game_setups); i++)
+    {
+        const char *beside = runtime_game_setups[i].beside;
+        char *slash;
+
+        if (strcasecmp( name, runtime_game_setups[i].exe )) continue;
+        memcpy( folder, target, len - 1 );
+        folder[len - 1] = 0;
+        snprintf( probe, sizeof(probe), "%s", folder );
+        /* without "..", which the card's file system is not trusted to walk */
+        if (!strncmp( beside, "../", 3 ))
+        {
+            if (!(slash = strrchr( probe, '/' ))) continue;
+            *slash = 0;
+            beside += 3;
+        }
+        snprintf( probe + strlen( probe ), sizeof(probe) - strlen( probe ), "/%s", beside );
+        if (!stat( probe, &st )) return &runtime_game_setups[i];
+    }
+    return NULL;
+}
+
+/* A game in runtime_game_setups whose setup has not run for its folder: the
+ * setup goes first, the game waits in run-next.txt. */
+static void run_game_setup_first( char *target, size_t size )
+{
+    const struct runtime_game_setup *game;
+    char folder[600], dos[600], setup[320];
+    unsigned int hash = 2166136261u;
+    const char *c;
+    int length;
+
+    if (!strcasecmp( target, COMPONENTS_SETUP )) return;
+    if (!(game = runtime_match_game_setup( target, folder, sizeof(folder) ))) return;
+    for (c = folder; *c; c++) hash = (hash ^ (unsigned char)tolower( (unsigned char)*c )) * 16777619u;
+    snprintf( runtime_game_setup_done, sizeof(runtime_game_setup_done),
+              WINE_NX_RUNTIME_ROOT "/registry/game-%s-%u-%08x.done", game->id, game->version, hash );
+    if (!access( runtime_game_setup_done, F_OK )) return;
+    snprintf( setup, sizeof(setup), LAUNCHER_DRIVE_C "/%s", game->setup );
+    if (access( setup, F_OK ))
+    {
+        log_line( "[GAME] %s: its setup %s is not on the card; the game starts as it is", game->id, setup );
+        return;
+    }
+    if (!envHasNextLoad() || !own_nro[0])
+    {
+        log_line( "[GAME] %s: this loader cannot start Autorun again; the game starts without its setup", game->id );
+        return;
+    }
+    if (!target_to_dos_path( folder, dos, sizeof(dos) ) ||
+        (length = snprintf( runtime_extra_environment, sizeof(runtime_extra_environment),
+                            "WINE_NX_GAME_FOLDER=%s", dos )) <= 0 ||
+        (size_t)length >= sizeof(runtime_extra_environment))
+    {
+        log_line( "[GAME] %s: the game's folder is too long to hand to its setup", game->id );
+        return;
+    }
+    if (!write_line( WINE_NX_RUNTIME_ROOT "/run-next.txt", target ))
+    {
+        log_line( "[GAME] %s: could not write run-next.txt; the game starts without its setup", game->id );
+        return;
+    }
+    runtime_extra_environment_size = length + 1;
+    runtime_game_setup_run = 1;
+    log_line( "[GAME] %s: running its setup for %s before the game", game->id, dos );
+    snprintf( target, size, "%s", setup );
 }
 
 static int return_to_launcher( void )
@@ -3409,6 +3515,17 @@ static int return_to_launcher( void )
             log_memory_map( "exit" );
             still_lent = 1;
         }
+    }
+    if (runtime_game_setup_run)
+    {
+        char done[64];
+
+        /* Marked whatever it answered, as the components setup is: the log
+         * says how it went, and the game is not held behind it every time. */
+        snprintf( done, sizeof(done), "exit code 0x%x", wine_nx_program_exit_code );
+        write_line( runtime_game_setup_done, done );
+        log_line( wine_nx_program_exit_code ? "[GAME] its setup ran, but a step failed (%s)"
+                                            : "[GAME] its setup ran (%s)", done );
     }
     if (runtime_components_run)
     {
@@ -3974,6 +4091,7 @@ int main( int argc, char **argv )
     }
 
     run_components_first( target, sizeof(target) );
+    run_game_setup_first( target, sizeof(target) );
 
     /* From here a thread may be asked to end; this one comes back here. */
     if (setjmp( quit_jump )) return return_to_launcher();

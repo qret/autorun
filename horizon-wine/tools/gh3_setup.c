@@ -92,10 +92,20 @@ static BOOL set_string( HKEY key, const WCHAR *name, const WCHAR *value )
     return !status;
 }
 
-/* This program's folder, with the trailing backslash the installer writes. */
+/* The game's folder, with the trailing backslash the installer writes: the
+ * one Autorun names when it runs this before the game (runtime.c,
+ * run_game_setup_first), else this program's own. */
 static BOOL own_folder( WCHAR *out, unsigned int max )
 {
-    unsigned int n = GetModuleFileNameW( NULL, out, max );
+    unsigned int n = GetEnvironmentVariableW( L"WINE_NX_GAME_FOLDER", out, max );
+
+    if (n && n + 1 < max)
+    {
+        if (out[n - 1] != '\\') out[n++] = '\\';
+        out[n] = 0;
+        return TRUE;
+    }
+    n = GetModuleFileNameW( NULL, out, max );
 
     if (!n || n >= max) return FALSE;
     while (n && out[n - 1] != '\\') n--;
