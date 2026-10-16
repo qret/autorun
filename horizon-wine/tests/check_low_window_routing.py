@@ -75,6 +75,14 @@ int main(void)
     assert(address_space_fits(&l, &p));
     o.address_space_bits = 32;
     assert(address_space_fits(&l, &p));
+    /* Auto with a fixed-low header takes the window where there is one, and only
+     * then: without it the game still needs Autorun 32-bit. */
+    o.address_space_bits = 39;
+    p.settings.address_space = -1;
+    detected = LAUNCHER_ADDRESS_LOW;
+    assert(address_space_fits(&l, &p));
+    o.alias_window = 0;
+    assert(!address_space_fits(&l, &p));
     puts("Low window: verified forwarder ID and 39-bit capability gating passed");
 }
 '''

@@ -192,8 +192,12 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
                 step = STEP_DLLS;
                 break;
             case STEP_DLLS:
-                /* Downloading moves on once the card has them; skipping moves on as it is. */
-                if (dlls_ready || selected || launcher_dlls_install(dlls)) step = STEP_32BIT;
+                /* Downloading moves on once the card has them; skipping moves on as it is.
+                 * With room for the alias window, fixed-low games run in this Autorun:
+                 * Autorun 32-bit is not needed and not offered. */
+                if (dlls_ready || selected || launcher_dlls_install(dlls))
+                    step = options->address_space_bits == 39 && options->alias_window && !have_32bit ?
+                           STEP_FINISH : STEP_32BIT;
                 break;
             case STEP_32BIT:
                 if (!have_32bit && !selected)

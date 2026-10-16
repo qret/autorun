@@ -3483,19 +3483,21 @@ static int runtime_program_needs_low( const char *program )
     return launcher_program_address_space( program ) == LAUNCHER_ADDRESS_LOW;
 }
 
-/* Whether a program is set to run through the alias window (launcher.c,
- * program_runs_in_window). */
+/* Whether a program goes through the alias window: set to Window, or Auto with a
+ * fixed-low header (launcher.c, program_runs_in_window). */
 static int runtime_program_window( const char *program )
 {
     struct launcher_kv kv;
     struct launcher_settings settings;
     char path[512];
 
-    if (program[1] == ':' || !launcher_program_settings_path( RUNTIME_DIR, program, path, sizeof(path) ) ||
-        !launcher_kv_load( &kv, path ))
-        return 0;
-    launcher_settings_read( &kv, &settings );
-    return settings.address_space == 2;
+    if (program[1] != ':' && launcher_program_settings_path( RUNTIME_DIR, program, path, sizeof(path) ) &&
+        launcher_kv_load( &kv, path ))
+    {
+        launcher_settings_read( &kv, &settings );
+        if (settings.address_space >= 0) return settings.address_space == 2;
+    }
+    return launcher_program_address_space( program ) == LAUNCHER_ADDRESS_LOW;
 }
 
 /* Leave the program in run-next.txt for Autorun 32-bit and ask the console for
@@ -3952,13 +3954,7 @@ int main( int argc, char **argv )
 #ifdef WINE_NX_FEX
             runtime_fex = settings.fex;
 #endif
-            /* Set to Window, with room for it: only Box64 reaches the window. */
-            if (settings.address_space == 2 && alias_window_available && !low_window_available &&
-                runtime_address_space_bits() == 39)
-            {
-                window_game = 1;
-                runtime_fex = 0;
-            }
+
             runtime_four_cores = settings.four_cores;
             if (settings.verbose >= 0) wine_nx_runtime_verbose = settings.verbose;
             if (settings.profile >= 0) runtime_profile = settings.profile;
@@ -4036,6 +4032,14 @@ int main( int argc, char **argv )
     open_game_log( target );
     log_line( "wine-nx-runtime: generic Wine ntdll PE loader path" );
     log_line( "[BUILD] %s", WINE_NX_RUNTIME_BUILD );
+    /* Set to Window, or Auto with a fixed-low header, and room for the window:
+     * only Box64 reaches it so far, whatever the game's CPU setting. */
+    if (alias_window_available && !low_window_available && runtime_address_space_bits() == 39 &&
+        runtime_program_window( target ))
+    {
+        window_game = 1;
+        runtime_fex = 0;
+    }
     log_line( "[SYNC] %s", horizon_fast_sync_enabled ? "Horizon queued waits" : "Standard" );
     wine_nx_thread_configure_cores( runtime_four_cores );
     log_line( "[SDCACHE] %s", sd_cache ? "sdmc reads cached: 128 KB chunks, 8 per file, 32 to 192 MB in all"

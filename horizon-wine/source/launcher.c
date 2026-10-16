@@ -1985,11 +1985,15 @@ static int program_needs_low( struct program *p )
     return launcher_program_address_space( p->path ) == LAUNCHER_ADDRESS_LOW;
 }
 
-/* Set to Window and this 39-bit process has room for the alias window: the game
- * runs here, through Box64, its fixed-low image moved by the window's base. */
+/* Set to Window, or Auto with a fixed-low header, and this 39-bit process has
+ * room for the alias window: the game runs here, through Box64, its image moved
+ * by the window's base. Autorun 32-bit is left for when there is no window. */
 static int program_runs_in_window( struct launcher *l, struct program *p )
 {
-    return p->settings.address_space == 2 && l->options->address_space_bits == 39 && l->options->alias_window;
+    int wants = p->settings.address_space == 2 ||
+                (p->settings.address_space < 0 && launcher_program_address_space( p->path ) == LAUNCHER_ADDRESS_LOW);
+
+    return wants && l->options->address_space_bits == 39 && l->options->alias_window;
 }
 
 /* Whether this process can run it at all. Nothing here can widen or narrow the
@@ -2513,16 +2517,18 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             enum launcher_address_space needs = launcher_program_address_space( p->path );
 
             ADD_ROW( ROW_ADDRESS, SECTION_EMULATION, "Address space",
-                     "Auto reads the game's header: one linked for a fixed address in the low 4 GB starts from "
-                     "Autorun 32-bit. 32-bit and Any override a header that does not tell the truth. Window "
-                     "(experimental) keeps such a game in this Autorun with all of its memory, through Box64." );
+                     "Auto reads the game's header: one linked for a fixed address in the low 4 GB runs in this "
+                     "Autorun's window, with all of its memory, through Box64, or from Autorun 32-bit where there "
+                     "is no window. 32-bit, Any and Window (experimental) override the choice." );
             row->kind = UI_ROW_DROPDOWN;
             row->choices = 4;
             if (p->settings.address_space >= 0)
                 snprintf( row->value, sizeof(row->value), "%s", p->settings.address_space == 2 ? "Window" :
                           p->settings.address_space ? "32-bit" : "Any" );
             else snprintf( row->value, sizeof(row->value), "Auto (%s)",
-                           needs == LAUNCHER_ADDRESS_LOW ? "32-bit" : needs == LAUNCHER_ADDRESS_ANY ? "any" : "unread" );
+                           needs == LAUNCHER_ADDRESS_LOW ?
+                               (l->options->address_space_bits == 39 && l->options->alias_window ? "window" : "32-bit") :
+                           needs == LAUNCHER_ADDRESS_ANY ? "any" : "unread" );
         }
 
         ADD_ROW( ROW_SYNC, SECTION_EMULATION, "Synchronization",
