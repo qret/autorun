@@ -3463,7 +3463,7 @@ static void settings_menu( struct launcher *l )
         snprintf( rows[SET_SETUP].label, sizeof(rows[0].label), "Quick setup" );
         rows[SET_SETUP].kind = UI_ROW_ACTION;
         rows[SET_SETUP].adjustable = 0;
-        rows[SET_SETUP].help = "Install the Autorun forwarder or update its patched Hekate boot entry.";
+        rows[SET_SETUP].help = "Install the Autorun forwarder and, where it is needed, Autorun 32-bit.";
         snprintf( rows[SET_REOPEN].label, sizeof(rows[0].label), "Return here when a program ends" );
         snprintf( rows[SET_REOPEN].value, sizeof(rows[0].value), "%s", on_off[!!l->options->reopen_launcher] );
         rows[SET_REOPEN].kind = UI_ROW_SWITCH;
@@ -3473,8 +3473,8 @@ static void settings_menu( struct launcher *l )
         snprintf( rows[SET_MAKE_MAIN].label, sizeof(rows[0].label), "Make an Autorun forwarder" );
         snprintf( rows[SET_MAKE_MAIN].value, sizeof(rows[0].value), "%s",
                   l->options->install_forwarder ? "Autorun" : "Unavailable" );
-        rows[SET_MAKE_MAIN].help = "Installs the 39-bit Autorun forwarder. Fixed-address Win32 games start from "
-                                   "Autorun 32-bit. Use emuMMC only.";
+        rows[SET_MAKE_MAIN].help = "Installs the 39-bit Autorun forwarder. Fixed-address Win32 games run in its "
+                                   "alias window, or from Autorun 32-bit where there is none. Use emuMMC only.";
         rows[SET_MAKE_MAIN].adjustable = 0;
         rows[SET_MAKE_MAIN].disabled = !l->options->install_forwarder;
         snprintf( rows[SET_MAKE_32BIT].label, sizeof(rows[0].label), "Make an Autorun 32-bit forwarder" );
@@ -3482,9 +3482,9 @@ static void settings_menu( struct launcher *l )
                   !l->options->install_forwarder_32bit ? "Unavailable" :
                   l->options->title_installed && l->options->title_installed( l->options->forwarder_32bit_id )
                   ? "Installed" : "Autorun 32-bit" );
-        rows[SET_MAKE_32BIT].help = "For Win32 games linked for a fixed address in the low 4 GB, on any "
-                                    "Atmosphere and without changing it. Such a game is sent there by itself. "
-                                    "Use emuMMC only.";
+        rows[SET_MAKE_32BIT].help = "A fallback for Win32 games linked for a fixed address in the low 4 GB, "
+                                    "where the alias window is not available; on any Atmosphere, without changing "
+                                    "it. Such a game is sent there by itself. Use emuMMC only.";
         rows[SET_MAKE_32BIT].adjustable = 0;
         rows[SET_MAKE_32BIT].disabled = !l->options->install_forwarder_32bit;
 #ifdef WINE_NX_SWAP_POC
