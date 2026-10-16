@@ -2383,7 +2383,6 @@ static NTSTATUS runtime_start_wow64( void *module, void *entry,
 }
 #endif
 
-#ifdef WINE_NX_AMD64
 static NTSTATUS runtime_create_registry_path( const char *path, HANDLE *key )
 {
     WCHAR key_name[256];
@@ -2424,6 +2423,54 @@ static NTSTATUS runtime_create_registry_path( const char *path, HANDLE *key )
     return STATUS_OBJECT_PATH_SYNTAX_BAD;
 }
 
+/* The Witcher (Enhanced Edition) looks up where it is installed in the
+ * registry and quits at once, before any window, when the key is not there;
+ * a copy put on the card never ran its installer. System\witcher.exe beside
+ * a Data folder is taken for it, and the folder it is in now is written as
+ * its InstallFolder, in both views of the registry, before it starts. */
+static void runtime_witcher_install_folder( const char *target )
+{
+    static const char *const keys[] =
+    {
+        "\\Registry\\Machine\\Software\\CD Projekt RED\\The Witcher",
+        "\\Registry\\Machine\\Software\\Wow6432Node\\CD Projekt RED\\The Witcher",
+    };
+    static const WCHAR install_folder[] = {'I','n','s','t','a','l','l','F','o','l','d','e','r',0};
+    char root[768], data[800], dos[768];
+    WCHAR folder[768];
+    UNICODE_STRING name;
+    struct stat st;
+    const char *slash;
+    size_t len, i, k;
+    HANDLE key;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (strcasecmp( path_basename( target ), "witcher.exe" )) return;
+    /* .../<game>/System/witcher.exe -> .../<game> */
+    len = path_basename( target ) - target;
+    if (len < 8 || len >= sizeof(root)) return;
+    memcpy( root, target, len - 1 );
+    root[len - 1] = 0;
+    if (!(slash = strrchr( root, '/' )) || strcasecmp( slash + 1, "System" )) return;
+    root[slash - root] = 0;
+    snprintf( data, sizeof(data), "%s/Data", root );
+    if (stat( data, &st ) || !S_ISDIR( st.st_mode )) return;
+    if (!target_to_dos_path( root, dos, sizeof(dos) )) return;
+    for (i = 0; dos[i] && i < ARRAY_SIZE(folder) - 1; i++) folder[i] = (unsigned char)dos[i];
+    folder[i] = 0;
+    name.Buffer = (WCHAR *)install_folder;
+    name.Length = sizeof(install_folder) - sizeof(WCHAR);
+    name.MaximumLength = sizeof(install_folder);
+    for (k = 0; k < ARRAY_SIZE(keys) && !status; k++)
+    {
+        if ((status = runtime_create_registry_path( keys[k], &key ))) break;
+        status = NtSetValueKey( key, &name, 0, REG_SZ, folder, (i + 1) * sizeof(WCHAR) );
+        NtClose( key );
+    }
+    log_line( "[GAME] The Witcher: InstallFolder=%s status=%08x", dos, (unsigned)status );
+}
+
+#ifdef WINE_NX_AMD64
 static NTSTATUS runtime_prepare_arm64ec(void)
 {
     static const char key_path[] = "\\Registry\\Machine\\Software\\Microsoft\\Wow64\\amd64";
@@ -4253,6 +4300,7 @@ int main( int argc, char **argv )
         runtime_init_peb_process( teb, module, params );
         set_load_order_app_name( params->ImagePathName.Buffer );
         log_line( "[PEB] image=%s nt=\\??\\%s", dos_path, dos_path );
+        runtime_witcher_install_folder( target );
 
 #ifdef WINE_NX_AMD64
         if (target_machine == IMAGE_FILE_MACHINE_AMD64)
