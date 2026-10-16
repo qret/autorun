@@ -9,6 +9,7 @@ struct VirtmemReservation { uintptr_t base; size_t size; };
 static struct VirtmemReservation reservation;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static u64 aslr_base, aslr_end, heap_base, occupied;
+static u64 heap_size, alias_base, alias_size, stack_base, stack_size, tls_override;
 static unsigned int reserved_count, find_count, mapped_count, logs;
 static int info_fail, reservation_fail, map_fail, permission_fail, query_fail;
 static void *mapped_address, *mapped_backing;
@@ -46,6 +47,11 @@ Result svcGetInfo(u64 *value, InfoType type, Handle process, u64 sub)
     if (info_fail) return 1;
     if (type == InfoType_AslrRegionAddress) *value = aslr_base;
     else if (type == InfoType_AslrRegionSize) *value = aslr_end - aslr_base;
+    else if (type == InfoType_HeapRegionSize) *value = heap_size;
+    else if (type == InfoType_AliasRegionAddress) *value = alias_base;
+    else if (type == InfoType_AliasRegionSize) *value = alias_size;
+    else if (type == InfoType_StackRegionAddress) *value = stack_base;
+    else if (type == InfoType_StackRegionSize) *value = stack_size;
     else *value = heap_base;
     return 0;
 }
@@ -63,8 +69,9 @@ Result svcMapProcessCodeMemory(Handle process, u64 address, u64 backing, size_t 
 {
     locked();
     assert(process == 1 && !mapped_address && size == 0x1000);
-    assert(address == 0x400000 || address == 0xffff0000);
-    assert(backing >= WINE_NX_NATIVE_BASE && !(backing & 0xfff));
+    assert(address == 0x400000 || address == 0xffff0000 ||
+           ((address & 0xffffffff) == 0x400000 || (address & 0xffffffff) == WINE_NX_ALIAS_WINDOW_SIZE - 0x10000));
+    assert(!(backing & 0xfff));
     mapped_count++;
     if (map_fail) return 2;
     mapped_address = mmap((void *)(uintptr_t)address, size, PROT_READ | PROT_WRITE,
@@ -91,7 +98,7 @@ Result svcUnmapProcessCodeMemory(Handle process, u64 address, u64 backing, size_
     mapped_perm = 0;
     return 0;
 }
-void *armGetTls(void) { return &mutex; }
+void *armGetTls(void) { return tls_override ? (void *)(uintptr_t)tls_override : (void *)&mutex; }
 void armDCacheFlush(void *address, size_t size) { __builtin___clear_cache(address, (char *)address + size); }
 void armICacheInvalidate(void *address, size_t size) { __builtin___clear_cache(address, (char *)address + size); }
 Handle envGetOwnProcessHandle(void) { return 1; }
@@ -100,6 +107,13 @@ static void report(const char *message)
     assert(!pthread_mutex_trylock(&mutex));
     pthread_mutex_unlock(&mutex);
     assert(strstr(message, "[LOWVA]"));
+    logs++;
+}
+static void report_window(const char *message)
+{
+    assert(!pthread_mutex_trylock(&mutex));
+    pthread_mutex_unlock(&mutex);
+    assert(strstr(message, "[WINDOW]"));
     logs++;
 }
 static void reset(u64 base, u64 end)
@@ -111,7 +125,66 @@ static void reset(u64 base, u64 end)
     aslr_base = base;
     aslr_end = end;
     heap_base = 0x1000000000;
+    heap_size = 0x200000000;
+    alias_base = stack_base = 0x1000000000;
+    alias_size = stack_size = 0x1000;
+    tls_override = 0;
     occupied = 0;
+}
+/* Heap 4-12 GiB, alias 64 GiB, stack 128 GiB, a thread-local page at 256 GiB:
+ * of the powers of two only 16 GiB is left. */
+static void alias_layout_with_gaps(void)
+{
+    reset(0x8000000, WINE_NX_HOST_LIMIT);
+    heap_base = 0x100000000;
+    heap_size = 0x200000000;
+    alias_base = alias_size = 0x1000000000;
+    stack_base = 0x2000000000;
+    stack_size = 0x80000000;
+    tls_override = 0x4000000000;
+}
+static void alias_window_tests(void)
+{
+    struct alias_layout layout;
+    unsigned int tried;
+    u64 base;
+
+    alias_layout_with_gaps();
+    virtmemLock();
+    assert(alias_window_layout(&layout));
+    assert(alias_window_choose(&layout, &base, &tried) && base == 0x400000000 && tried == 3);
+    /* The heap over 4-36 GiB takes 16 and 32 GiB too: the first multiple of
+     * 4 GiB past it that no region holds is 36 GiB. */
+    heap_size = 0x800000000;
+    assert(alias_window_layout(&layout));
+    assert(alias_window_choose(&layout, &base, &tried) && base == 0x900000000);
+    assert(base + WINE_NX_ALIAS_WINDOW_SIZE <= tls_override - 64 * ALIAS_GIB || base >= tls_override + 64 * ALIAS_GIB);
+    occupied = 1;
+    assert(!alias_window_choose(&layout, &base, &tried) && tried == 7 + 127 - 2 - 5);
+    occupied = 0;
+    info_fail = 1;
+    assert(!alias_window_layout(&layout));
+    info_fail = 0;
+    virtmemUnlock();
+
+    alias_layout_with_gaps();
+    occupied = 1;
+    assert(!wine_nx_alias_window_probe(report_window) && !mapped_count && logs == 1);
+    alias_layout_with_gaps();
+    info_fail = 1;
+    assert(!wine_nx_alias_window_probe(report_window) && !mapped_count && logs == 1);
+    alias_layout_with_gaps();
+    map_fail = 1;
+    assert(!wine_nx_alias_window_probe(report_window) && mapped_count == 1 && !mapped_address && logs == 3);
+    alias_layout_with_gaps();
+    permission_fail = 1;
+    assert(!wine_nx_alias_window_probe(report_window) && !mapped_address && logs == 3);
+#ifdef __aarch64__
+    alias_layout_with_gaps();
+    assert(wine_nx_alias_window_probe(report_window) && mapped_count == 2 && !mapped_address && logs == 4);
+    puts("Alias window: AArch64 execution at base + 0x400000 and a writable page at its top passed (mock SVCs)");
+#endif
+    puts("Alias window: base choice around heap, alias, stack and thread-local pages, and failure cleanup passed");
 }
 static void *worker(void *unused)
 {
@@ -169,4 +242,5 @@ int main(void)
     puts("Low window: AArch64 execution at 0x400000 and high-edge writable mapping passed (mock SVCs)");
 #endif
     puts("Low window: stock profiles, reservation, concurrency and failure cleanup passed");
+    alias_window_tests();
 }

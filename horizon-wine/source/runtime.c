@@ -3634,6 +3634,9 @@ int main( int argc, char **argv )
               runtime_address_space_bits() );
     log_line( "[LOWVA] forwarder title %016llx", runtime_title_id() );
     low_window_available = wine_nx_low_window_probe( log_line_plain );
+    /* Without the low window, whether this console has room for the alias
+     * window. It only looks and gives the pages back; nothing uses it yet. */
+    if (!low_window_available && runtime_address_space_bits() == 39) wine_nx_alias_window_probe( log_line_plain );
     {
         int recovered = autorun_install_recover( RUNTIME_DIR, strstr( own_nro, "/updates/previous.nro" ) != NULL );
         if (recovered < 0)
