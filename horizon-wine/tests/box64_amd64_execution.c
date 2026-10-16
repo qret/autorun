@@ -518,7 +518,7 @@ static void test_fault_context( struct fixture *fixture )
         assert( fixture->exception.ExceptionCode == (DWORD)STATUS_ACCESS_VIOLATION );
         assert( fixture->exception.ExceptionAddress == (void *)fault_pc );
         assert( !fixture->exception.ExceptionFlags && fixture->exception.NumberParameters == 2 );
-        assert( fixture->exception.ExceptionInformation[0] == access );
+        assert( !fault_context_has_esr || fixture->exception.ExceptionInformation[0] == access );
         assert( fixture->exception.ExceptionInformation[1] == fault_address );
         assert( !mprotect( (void *)fault_address, 0x1000, PROT_READ | PROT_WRITE ) );
         assert( run( fixture, &context, 0 ) == STATUS_SUCCESS );
@@ -545,7 +545,7 @@ static void test_partial_fault_context( struct fixture *fixture )
     context.R8 = fault_address;
     assert( run( fixture, &context, 0 ) == STATUS_ACCESS_VIOLATION );
     assert( context.Rsp == STACK && context.Rip == BASE + 0x2300 );
-    assert( fixture->exception.ExceptionInformation[0] == 1 );
+    assert( !fault_context_has_esr || fixture->exception.ExceptionInformation[0] == 1 );
     put_code( fixture, 0x2400, movs, sizeof(movs) );
     init_context( &context, BASE + 0x2400 );
     context.Rsi = STACK; context.Rdi = fault_address; context.Rcx = 1;
