@@ -3461,6 +3461,23 @@ static int launcher_launch_title( unsigned long long id )
     return R_SUCCEEDED( rc );
 }
 
+/* Whether a program needs the low 4 GB: its Address space option, or its own
+ * header when the option is Auto (launcher.c, program_needs_low). */
+static int runtime_program_needs_low( const char *program )
+{
+    struct launcher_kv kv;
+    struct launcher_settings settings;
+    char path[512];
+
+    if (program[1] != ':' && launcher_program_settings_path( RUNTIME_DIR, program, path, sizeof(path) ) &&
+        launcher_kv_load( &kv, path ))
+    {
+        launcher_settings_read( &kv, &settings );
+        if (settings.address_space >= 0) return settings.address_space;
+    }
+    return launcher_program_address_space( program ) == LAUNCHER_ADDRESS_LOW;
+}
+
 /* Leave the program in run-next.txt for Autorun 32-bit and ask the console for
  * it. Returns what the launcher shows meanwhile, or why it could not. */
 static const char *runtime_hand_over_32bit( const char *program )
@@ -3758,7 +3775,7 @@ int main( int argc, char **argv )
     {
         const char *program = forwarded_game > 0 || resumed_program ? target : argv[1];
 
-        if (launcher_program_address_space( program ) == LAUNCHER_ADDRESS_LOW)
+        if (runtime_program_needs_low( program ))
         {
             launch_error = runtime_hand_over_32bit( program );
             forwarded_game = -1;

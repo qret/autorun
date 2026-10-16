@@ -437,6 +437,7 @@ static void load_program_settings( struct launcher *l, struct program *p )
     p->own_files = 0;
     memset( &p->settings, 0, sizeof(p->settings) );
     p->settings.verbose = p->settings.profile = p->settings.framebuffer = -1;
+    p->settings.address_space = -1;  /* Auto: the header decides */
     p->settings.fex = p->settings.four_cores = 1;
     if (launcher_program_settings_path( l->options->runtime_dir, p->path, path, sizeof(path) ) &&
         launcher_kv_load( &kv, path ))
@@ -1755,6 +1756,7 @@ enum program_row
     ROW_LSFG, ROW_LSFG_DLL, ROW_LSFG_PERFORMANCE, ROW_LSFG_FLOW,
     ROW_UPSCALING, ROW_UPSCALING_SHARPNESS,
     ROW_INPUT, ROW_INPUT_END = ROW_INPUT + INPUT_ROW_COUNT - 1, ROW_BOX64, ROW_FEX, ROW_SYNC, ROW_CPU, ROW_FOUR_CORES,
+    ROW_ADDRESS,
     ROW_HIDE, ROW_LIBRARY, PROGRAM_ROWS
 };
 
@@ -1975,14 +1977,21 @@ static int next_state( int state, int direction )
     return order[(i + (direction < 0 ? 2 : 1)) % 3];
 }
 
+/* What the program needs of the address space: what it was told in its options,
+ * or what its own header says when it was told nothing. */
+static int program_needs_low( struct program *p )
+{
+    if (p->settings.address_space >= 0) return p->settings.address_space;
+    return launcher_program_address_space( p->path ) == LAUNCHER_ADDRESS_LOW;
+}
+
 /* Whether this process can run it at all. Nothing here can widen or narrow the
  * address space: Horizon fixed it when the forwarder started this process. A
  * 32-bit space begins low enough for any fixed image base. */
 static int address_space_fits( struct launcher *l, struct program *p )
 {
     if (l->options->address_space_bits == 32) return 1;
-    return l->options->address_space_bits == 39 &&
-           (l->options->low_window || launcher_program_address_space( p->path ) != LAUNCHER_ADDRESS_LOW);
+    return l->options->address_space_bits == 39 && (l->options->low_window || !program_needs_low( p ));
 }
 
 /* The forwarder the game should start from instead of this one, or 0 to start
@@ -1993,7 +2002,7 @@ static int address_space_fits( struct launcher *l, struct program *p )
 static unsigned long long forwarder_for( struct launcher *l, struct program *p )
 {
     const struct wine_nx_launcher_options *o = l->options;
-    int low = launcher_program_address_space( p->path ) == LAUNCHER_ADDRESS_LOW;
+    int low = program_needs_low( p );
 
     if (!o->launch_title || !o->title_installed) return 0;
     if (o->address_space_bits == 39 && !o->low_window && low && o->forwarder_32bit_id) return o->forwarder_32bit_id;
@@ -2492,6 +2501,20 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
         row->on = p->settings.four_cores;
         snprintf( row->value, sizeof(row->value), "%s", p->settings.four_cores ? "Enabled" : "Disabled" );
 
+        {
+            enum launcher_address_space needs = launcher_program_address_space( p->path );
+
+            ADD_ROW( ROW_ADDRESS, SECTION_EMULATION, "Address space",
+                     "Auto reads the game's header: one linked for a fixed address in the low 4 GB starts from "
+                     "Autorun 32-bit. 32-bit and Any override a header that does not tell the truth." );
+            row->kind = UI_ROW_DROPDOWN;
+            row->choices = 3;
+            if (p->settings.address_space >= 0)
+                snprintf( row->value, sizeof(row->value), "%s", p->settings.address_space ? "32-bit" : "Any" );
+            else snprintf( row->value, sizeof(row->value), "Auto (%s)",
+                           needs == LAUNCHER_ADDRESS_LOW ? "32-bit" : needs == LAUNCHER_ADDRESS_ANY ? "any" : "unread" );
+        }
+
         ADD_ROW( ROW_SYNC, SECTION_EMULATION, "Synchronization",
                  "Horizon uses direct synchronization and targeted wakeups. Standard uses server requests." );
         row->kind = UI_ROW_DROPDOWN;
@@ -2861,6 +2884,29 @@ static int program_menu( struct launcher *l, struct program *p, char *target, si
             break;
         }
 #endif
+        case ROW_ADDRESS:
+        {
+            /* Auto, then the two answers, so either can be forced. */
+            static const int values[3] = { -1, 1, 0 };
+            struct ui_row items[3] = {0};
+            int selected;
+
+            if (action == UI_ACTION_RESET) selected = 0;
+            else if (action == UI_ACTION_CHOOSE)
+            {
+                snprintf( items[0].label, sizeof(items[0].label), "Auto" );
+                snprintf( items[1].label, sizeof(items[1].label), "32-bit" );
+                snprintf( items[2].label, sizeof(items[2].label), "Any" );
+                selected = ui_settings_dropdown( ui, &list, items, 3,
+                                                 p->settings.address_space < 0 ? 0 : p->settings.address_space ? 1 : 2 );
+                if (selected < 0) break;
+            }
+            else break;
+            p->settings.address_space = values[selected];
+            save_program_settings( l, p );
+            break;
+        }
+
         case ROW_FOUR_CORES:
             if (action == UI_ACTION_RESET) p->settings.four_cores = 1;
             else if (p->settings.four_cores) p->settings.four_cores = 0;

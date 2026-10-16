@@ -82,6 +82,25 @@ static void test_settings( const char *dir )
     load_text( &kv, "four-cores=unknown\n" );
     launcher_settings_read( &kv, &settings );
     assert( settings.four_cores );
+    /* Address space: Auto by default and left out of the file; 32-bit and any
+     * are written as upstream wrote them, and read back. */
+    assert( settings.address_space == -1 );
+    load_text( &kv, "address-space=32-bit\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.address_space == 1 && launcher_settings_write( &kv, &settings ) );
+    launcher_settings_read( &kv, &back );
+    assert( back.address_space == 1 && strstr( kv.text, "address-space=32-bit" ) );
+    load_text( &kv, "address-space=any\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.address_space == 0 );
+    settings.address_space = -1;
+    assert( launcher_settings_write( &kv, &settings ) && !strstr( kv.text, "address-space=" ) );
+    load_text( &kv, "address-space=bogus\n" );
+    launcher_settings_read( &kv, &settings );
+    assert( settings.address_space == -1 );
+    settings.address_space = 2;
+    assert( !launcher_settings_write( &kv, &settings ) );
+    settings.address_space = -1;
     load_text( &kv, "cpu=box64\n" );
     launcher_settings_read( &kv, &settings );
     assert( !settings.fex );
@@ -217,6 +236,7 @@ static void test_settings( const char *dir )
     load_text( &kv, "# written by hand\n" );
     memset( &settings, 0, sizeof(settings) );
     settings.fex = settings.four_cores = 1;
+    settings.address_space = -1;
     settings.vsync = settings.lsfg_performance = settings.lsfg_flow = 1;
     strcpy( settings.title, "Need for Speed" );
     settings.hidden = 1;
@@ -235,6 +255,7 @@ static void test_settings( const char *dir )
     /* Back to the global settings: only the comment stays; without it the file goes. */
     memset( &settings, 0, sizeof(settings) );
     settings.fex = settings.four_cores = 1;
+    settings.address_space = -1;
     settings.d3d = LAUNCHER_D3D_DXVK;
     settings.verbose = settings.profile = settings.framebuffer = -1;
     settings.vsync = settings.lsfg_performance = settings.lsfg_flow = 1;
