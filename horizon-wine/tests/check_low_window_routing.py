@@ -34,28 +34,37 @@ enum launcher_address_space { LAUNCHER_ADDRESS_LOW, LAUNCHER_ADDRESS_ANY };
 static enum launcher_address_space detected;
 struct options { int address_space_bits, low_window; };
 struct launcher { struct options *options; };
-struct program { const char *path; };
+struct launcher_settings { int address_space; };
+struct program { const char *path; struct launcher_settings settings; };
 static enum launcher_address_space launcher_program_address_space(const char *path)
 { (void)path; return detected; }
 '''
+fixture += function('static int program_needs_low(')
 fixture += function('static int address_space_fits(')
 fixture += r'''
 int main(void)
 {
     struct options o = {39, 0};
     struct launcher l = {&o};
-    struct program p = {"fixed.exe"};
+    struct program p = {"fixed.exe", {-1}};
     detected = LAUNCHER_ADDRESS_LOW;
     assert(!address_space_fits(&l, &p));
     o.low_window = 1;
     assert(address_space_fits(&l, &p));
+    /* A 32-bit space begins low enough for any image base. */
     o.address_space_bits = 32;
-    assert(!address_space_fits(&l, &p));
+    assert(address_space_fits(&l, &p));
     o.address_space_bits = 0;
     assert(!address_space_fits(&l, &p));
     o.address_space_bits = 39;
     o.low_window = 0;
     detected = LAUNCHER_ADDRESS_ANY;
+    assert(address_space_fits(&l, &p));
+    /* The game's "Address space" setting overrides what the header says. */
+    p.settings.address_space = 1;
+    assert(!address_space_fits(&l, &p));
+    detected = LAUNCHER_ADDRESS_LOW;
+    p.settings.address_space = 0;
     assert(address_space_fits(&l, &p));
     puts("Low window: verified forwarder ID and 39-bit capability gating passed");
 }
