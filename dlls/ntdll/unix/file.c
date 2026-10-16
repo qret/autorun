@@ -135,6 +135,10 @@
 #endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(file);
+
+#ifdef __SWITCH__
+extern void *wine_nx_window_address( const void *addr );
+#endif
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
 #ifdef __SWITCH__
@@ -6482,6 +6486,11 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
     unsigned long long wine_nx_read_start = horizon_interrupt_time();
 #endif
 
+#ifdef __SWITCH__
+    /* A buffer in the alias window is reached at its base: large reads go to the
+     * card's IPC as they are, where a guest address would only fail. */
+    buffer = wine_nx_window_address( buffer );
+#endif
     TRACE( "(%p,%p,%p,%p,%p,%p,0x%08x,%p,%p)\n",
            handle, event, apc, apc_user, io, buffer, length, offset, key );
 
@@ -6794,6 +6803,11 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
     BOOL send_completion = FALSE, async_write, append_write = FALSE, timeout_init_done = FALSE;
     LARGE_INTEGER offset_eof;
 
+#ifdef __SWITCH__
+    /* A buffer in the alias window is reached at its base: large reads go to the
+     * card's IPC as they are, where a guest address would only fail. */
+    buffer = wine_nx_window_address( buffer );
+#endif
     TRACE( "(%p,%p,%p,%p,%p,%p,0x%08x,%p,%p)\n",
            handle, event, apc, apc_user, io, buffer, length, offset, key );
 

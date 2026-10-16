@@ -6783,6 +6783,10 @@ NTSTATUS WINAPI NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *s
  *             NtFreeVirtualMemory   (NTDLL.@)
  *             ZwFreeVirtualMemory   (NTDLL.@)
  */
+#ifdef __SWITCH__
+static void *window_address( const void *addr );
+#endif
+
 NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *size_ptr, ULONG type )
 {
     struct file_view *view;
@@ -6793,6 +6797,9 @@ NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *si
     SIZE_T size = *size_ptr;
 
     TRACE("%p %p %08lx %x\n", process, addr, size, type );
+#ifdef __SWITCH__
+    if (process == NtCurrentProcess()) addr = window_address( addr );
+#endif
 
     if (process != NtCurrentProcess())
     {
@@ -6888,6 +6895,9 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
     DWORD old;
 
     TRACE("%p %p %08lx %08x\n", process, addr, size, new_prot );
+#ifdef __SWITCH__
+    if (process == NtCurrentProcess()) addr = window_address( addr );
+#endif
 
     if (!old_prot)
         return STATUS_ACCESS_VIOLATION;
@@ -7503,6 +7513,9 @@ NTSTATUS WINAPI NtQueryVirtualMemory( HANDLE process, LPCVOID addr,
 
     TRACE("(%p, %p, info_class=%d, %p, %ld, %p)\n",
           process, addr, info_class, buffer, len, res_len);
+#ifdef __SWITCH__
+    if (process == NtCurrentProcess()) addr = window_address( addr );
+#endif
 
     switch(info_class)
     {
@@ -7892,6 +7905,9 @@ done:
  */
 NTSTATUS WINAPI NtUnmapViewOfSection( HANDLE process, PVOID addr )
 {
+#ifdef __SWITCH__
+    if (process == NtCurrentProcess()) addr = window_address( addr );
+#endif
     return unmap_view_of_section( process, addr, 0 );
 }
 
@@ -7909,6 +7925,9 @@ NTSTATUS WINAPI NtUnmapViewOfSectionEx( HANDLE process, PVOID addr, ULONG flags 
         return STATUS_INVALID_PARAMETER;
     }
     if (flags & MEM_UNMAP_WITH_TRANSIENT_BOOST) FIXME( "Ignoring MEM_UNMAP_WITH_TRANSIENT_BOOST.\n" );
+#ifdef __SWITCH__
+    if (process == NtCurrentProcess()) addr = window_address( addr );
+#endif
     return unmap_view_of_section( process, addr, flags );
 }
 
@@ -8153,6 +8172,11 @@ static void *window_address( const void *addr )
 
     if (window && (ULONG_PTR)addr >= 0x10000 && (ULONG_PTR)addr < 0x8000000) return (char *)window + (ULONG_PTR)addr;
     return (void *)addr;
+}
+
+void *wine_nx_window_address( const void *addr )
+{
+    return window_address( addr );
 }
 #endif
 
