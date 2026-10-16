@@ -1193,6 +1193,14 @@ NTSTATUS call_seh_handlers( EXCEPTION_RECORD *rec, CONTEXT *orig_context )
         {
             ERR( "invalid frame %I64x (%p-%p)\n", dispatch.EstablisherFrame,
                  NtCurrentTeb()->Tib.StackLimit, NtCurrentTeb()->Tib.StackBase );
+            /* Wine-NX: what was being dispatched, and the frame it unwound to. */
+            ERR( "exception %08lx at %p info %Ix %Ix; context rip %I64x rsp %I64x; "
+                 "frame pc %I64x image %I64x; emulator stack %I64x-%I64x\n",
+                 rec->ExceptionCode, rec->ExceptionAddress,
+                 rec->NumberParameters > 0 ? rec->ExceptionInformation[0] : 0,
+                 rec->NumberParameters > 1 ? rec->ExceptionInformation[1] : 0,
+                 orig_context->Rip, orig_context->Rsp, dispatch.ControlPc, dispatch.ImageBase,
+                 get_arm64ec_cpu_area()->EmulatorStackLimit, get_arm64ec_cpu_area()->EmulatorStackBase );
             rec->ExceptionFlags |= EXCEPTION_STACK_INVALID;
             break;
         }
@@ -1302,6 +1310,17 @@ static void dispatch_syscall( ARM64_NT_CONTEXT *context )
 static void * __attribute__((used)) prepare_exception_arm64ec( EXCEPTION_RECORD *rec, ARM64EC_NT_CONTEXT *context, ARM64_NT_CONTEXT *arm_ctx )
 {
     if (rec->ExceptionCode == STATUS_EMULATION_SYSCALL) dispatch_syscall( arm_ctx );
+    /* FEX packs the upper YMM halves into the ARM context; they go into the
+     * XSTATE area KiUserExceptionDispatcher reserves after the x64 context,
+     * not into arm_ctx, which context_arm_to_x64 would take for a CONTEXT_EX. */
+    if ((arm_ctx->ContextFlags & CONTEXT_ARM64_FEX_YMMSTATE) == CONTEXT_ARM64_FEX_YMMSTATE)
+    {
+        CONTEXT_EX *context_ex;
+
+        if (RtlInitializeExtendedContext2( context, CONTEXT_AMD64_ALL | CONTEXT_AMD64_XSTATE, &context_ex,
+                                           (ULONG64)1 << XSTATE_AVX ) || (void *)context_ex != context + 1)
+            arm_ctx->ContextFlags &= ~0x40;  /* no room: drop the upper halves, as Windows without AVX */
+    }
     context_arm_to_x64( context, arm_ctx );
     if (pResetToConsistentState) pResetToConsistentState( rec, &context->AMD64_Context, arm_ctx );
     /* call x64 dispatcher if the thunk or the function pointer was modified */
@@ -1318,12 +1337,14 @@ void __attribute__((naked)) KiUserExceptionDispatcher( EXCEPTION_RECORD *rec, CO
 {
     asm( ".seh_proc \"#KiUserExceptionDispatcher\"\n\t"
          ".seh_context\n\t"
-         "sub sp, sp, #0x4d0\n\t"       /* sizeof(ARM64EC_NT_CONTEXT) */
-         ".seh_stackalloc 0x4d0\n\t"
+         /* sizeof(ARM64EC_NT_CONTEXT), then a CONTEXT_EX and an AVX XSTATE
+          * area (0x20 + 0x30 alignment + 0x140) for FEX's YMM state */
+         "sub sp, sp, #0x670\n\t"
+         ".seh_stackalloc 0x670\n\t"
          ".seh_endprologue\n\t"
-         "add x0, sp, #0x3b0+0x4d0\n\t" /* rec */
+         "add x0, sp, #0x3b0+0x670\n\t" /* rec */
          "mov x1, sp\n\t"               /* context */
-         "add x2, sp, #0x4d0\n\t"       /* arm_ctx (context + 1) */
+         "add x2, sp, #0x670\n\t"       /* arm_ctx */
          "bl \"#prepare_exception_arm64ec\"\n\t"
          "cbz x0, 1f\n\t"
          /* bypass exit thunk to avoid messing up the stack */
@@ -1331,7 +1352,7 @@ void __attribute__((naked)) KiUserExceptionDispatcher( EXCEPTION_RECORD *rec, CO
          "ldr x16, [x16, #:lo12:__os_arm64x_dispatch_call_no_redirect]\n\t"
          "mov x9, x0\n\t"
          "blr x16\n"
-         "1:\tadd x0, sp, #0x3b0+0x4d0\n\t" /* rec */
+         "1:\tadd x0, sp, #0x3b0+0x670\n\t" /* rec */
          "mov x1, sp\n\t"                   /* context */
          "bl #dispatch_exception\n\t"
          "brk #1\n\t"
