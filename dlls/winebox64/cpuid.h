@@ -9,8 +9,8 @@
                              (1u << 19) /* SSE4.1 */ | (1u << 20) /* SSE4.2 */ | \
                              (1u << 23) /* POPCNT */)
 #define WINEBOX64_CPUID_EDX ((1u << 0) /* FPU */ | (1u << 4) /* TSC */ | (1u << 8) /* CX8 */ | \
-                             (1u << 15) /* CMOV */ | (1u << 23) /* MMX */ | (1u << 24) /* FXSR */ | \
-                             (1u << 25) /* SSE */ | (1u << 26) /* SSE2 */)
+                             (1u << 15) /* CMOV */ | (1u << 19) /* CLFSH */ | (1u << 23) /* MMX */ | \
+                             (1u << 24) /* FXSR */ | (1u << 25) /* SSE */ | (1u << 26) /* SSE2 */)
 
 static inline BOOLEAN winebox64_x86_feature_present( UINT feature )
 {

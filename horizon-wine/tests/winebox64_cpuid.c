@@ -49,6 +49,9 @@ int main(void)
     assert( !winebox64_x86_feature_present( PF_RDRAND_INSTRUCTION_AVAILABLE ) );
     assert( !winebox64_x86_feature_present( PF_NX_ENABLED ) );
     assert( !(WINEBOX64_CPUID_EDX & (1u << 28)) ); /* no HTT */
+    /* CLFLUSH, as the feature bits above already say (clfsh): a 64-bit JVM
+     * refuses to start without it. */
+    assert( WINEBOX64_CPUID_EDX & (1u << 19) );
     puts( "winebox64 CPU identity: CPUID, feature answers and x86 processor information agree" );
     return 0;
 }
