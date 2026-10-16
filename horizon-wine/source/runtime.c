@@ -509,6 +509,10 @@ static int runtime_fex;
 /* A fixed-low game in the alias window under FEX: our build of the WoW64 FEX
  * (fex/alias-window.patch) under its own name, told log2 of the window's base. */
 static int runtime_fex_window;
+/* Added to the program's environment (runtime_create_process_params): the
+ * game's folder for its setup (run_game_setup_first). */
+static char runtime_extra_environment[720];
+static size_t runtime_extra_environment_size;
 static unsigned int runtime_window_shift;
 #define RUNTIME_FEX_WINDOW_DLL "libwow64fex-window.dll"
 static int runtime_four_cores;
@@ -3494,9 +3498,6 @@ static const struct runtime_game_setup
 };
 static int runtime_game_setup_run;
 static char runtime_game_setup_done[192];
-/* Added to the program's environment (runtime_create_process_params). */
-static char runtime_extra_environment[720];
-static size_t runtime_extra_environment_size;
 
 /* The exit code the program gave NtTerminateProcess (dlls/ntdll/unix/process.c);
  * ~0 while it has not ended by itself. */
