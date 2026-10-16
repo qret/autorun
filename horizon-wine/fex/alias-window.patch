@@ -1,0 +1,340 @@
+diff --git a/FEXCore/Source/CMakeLists.txt b/FEXCore/Source/CMakeLists.txt
+index 00b4356..aa9b7f7 100644
+--- a/FEXCore/Source/CMakeLists.txt
++++ b/FEXCore/Source/CMakeLists.txt
+@@ -64,6 +64,7 @@ set(SRCS
+   Interface/IR/PassManager.cpp
+   Interface/IR/Passes/IRDumperPass.cpp
+   Interface/IR/Passes/IRValidation.cpp
++  Interface/IR/Passes/AliasWindowPass.cpp
+   Interface/IR/Passes/RedundantFlagCalculationElimination.cpp
+   Interface/IR/Passes/RegisterAllocationPass.cpp
+   Interface/IR/Passes/x87StackOptimizationPass.cpp
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 2f1284d..678f56b 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -38,6 +38,11 @@ $end_info$
+ #include <FEXCore/Core/CoreState.h>
+ #include <FEXCore/Core/SignalDelegator.h>
+ #include <FEXCore/Core/Thunks.h>
++
++#if __has_include("alias_window.h")
++#include "alias_window.h"
++#define FEX_HORIZON_ALIAS_WINDOW 1
++#endif
+ #include <FEXCore/Core/X86Enums.h>
+ #include <FEXCore/Debug/InternalThreadState.h>
+ #include <FEXCore/HLE/SyscallHandler.h>
+@@ -649,7 +654,12 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+         }
+ 
+         if (Config.SMCChecks == FEXCore::Config::CONFIG_SMC_FULL || Block.ForceFullSMCDetection) {
++#ifdef FEX_HORIZON_ALIAS_WINDOW
++          auto ExistingCodePtr = reinterpret_cast<uint8_t*>(
++            Config.Is64BitMode ? Block.Entry + BlockInstructionsLength : WineNX::FEX::AliasWindowHost(Block.Entry + BlockInstructionsLength));
++#else
+           auto ExistingCodePtr = reinterpret_cast<uint8_t*>(Block.Entry + BlockInstructionsLength);
++#endif
+           auto InstAddressReg = Thread->OpDispatcher->_EntrypointOffset(GPRSize, InstAddress - GuestRIP);
+ 
+           auto crc32 = [](const uint8_t* Ptr, size_t Size) -> uint32_t {
+diff --git a/FEXCore/Source/Interface/Core/Frontend.cpp b/FEXCore/Source/Interface/Core/Frontend.cpp
+index 3ba7435..b58f9ce 100644
+--- a/FEXCore/Source/Interface/Core/Frontend.cpp
++++ b/FEXCore/Source/Interface/Core/Frontend.cpp
+@@ -23,6 +23,11 @@ $end_info$
+ #include <FEXCore/Utils/Telemetry.h>
+ #include <FEXCore/Utils/TypeDefines.h>
+ #include <FEXCore/Debug/InternalThreadState.h>
++
++#if __has_include("alias_window.h")
++#include "alias_window.h"
++#define FEX_HORIZON_ALIAS_WINDOW 1
++#endif
+ #include <FEXCore/fextl/set.h>
+ 
+ namespace FEXCore::Frontend {
+@@ -1385,6 +1390,17 @@ const Decoder::DecodeStream Decoder::AdjustAddrForSpecialRegion(const uint8_t* _
+     };
+   }
+ 
++#ifdef FEX_HORIZON_ALIAS_WINDOW
++  // A 32-bit game in Autorun's alias window has its code below 128 MiB only at
++  // the window's base + RIP; RIP itself stays what the guest sees.
++  if (!BlockInfo.Is64BitMode && RIP < 0x8000000 && WineNX::FEX::AliasWindowBase()) {
++    return DecodeStream {
++      .InstStream = _InstStream - EntryPoint + RIP,
++      .AdjustedInstStream = reinterpret_cast<const uint8_t*>(WineNX::FEX::AliasWindowHost(RIP)),
++    };
++  }
++#endif
++
+   return DecodeStream {
+     .InstStream = _InstStream - EntryPoint + RIP,
+     .AdjustedInstStream = _InstStream - EntryPoint + RIP,
+diff --git a/FEXCore/Source/Interface/IR/PassManager.cpp b/FEXCore/Source/Interface/IR/PassManager.cpp
+index 5d3bcec..c3b9522 100644
+--- a/FEXCore/Source/Interface/IR/PassManager.cpp
++++ b/FEXCore/Source/Interface/IR/PassManager.cpp
+@@ -16,6 +16,11 @@ $end_info$
+ #include <FEXCore/Utils/LogManager.h>
+ #include <FEXCore/Utils/Profiler.h>
+ 
++#if __has_include("alias_window.h")
++#include "alias_window.h"
++#define FEX_HORIZON_ALIAS_WINDOW 1
++#endif
++
+ namespace FEXCore::IR {
+ class IREmitter;
+ 
+@@ -77,6 +82,16 @@ void PassManager::AddDefaultPasses(Context::ContextImpl* ctx) {
+     InsertPass(CreateDeadFlagCalculationEliminination());
+   }
+ 
++#ifdef FEX_HORIZON_ALIAS_WINDOW
++  // Not an optimization: a fixed-low 32-bit game in Autorun's alias window needs
++  // it to reach its memory at all, so it runs whatever the pass settings.
++  if (!ctx->Config.Is64BitMode) {
++    if (const auto Shift = WineNX::FEX::AliasWindowShift()) {
++      InsertPass(CreateAliasWindowPass(Shift), "AliasWindow");
++    }
++  }
++#endif
++
+   InsertPass(IR::CreateRegisterAllocationPass(&ctx->CPUID), "RA");
+ 
+ #if defined(ASSERTIONS_ENABLED) && ASSERTIONS_ENABLED
+diff --git a/FEXCore/Source/Interface/IR/Passes.h b/FEXCore/Source/Interface/IR/Passes.h
+index 213967a..98da4b5 100644
+--- a/FEXCore/Source/Interface/IR/Passes.h
++++ b/FEXCore/Source/Interface/IR/Passes.h
+@@ -11,6 +11,7 @@ struct HostFeatures;
+ namespace FEXCore::IR {
+ class Pass;
+ 
++fextl::unique_ptr<Pass> CreateAliasWindowPass(uint8_t Shift);
+ fextl::unique_ptr<Pass> CreateDeadFlagCalculationEliminination();
+ fextl::unique_ptr<Pass> CreateRegisterAllocationPass(const CPUIDEmu* CPUID);
+ fextl::unique_ptr<Pass> CreateX87StackOptimizationPass(const HostFeatures&, OpSize GPROpSize);
+diff --git a/FEXCore/Source/Interface/IR/Passes/AliasWindowPass.cpp b/FEXCore/Source/Interface/IR/Passes/AliasWindowPass.cpp
+new file mode 100644
+index 0000000..4a8d08e
+--- /dev/null
++++ b/FEXCore/Source/Interface/IR/Passes/AliasWindowPass.cpp
+@@ -0,0 +1,214 @@
++// SPDX-License-Identifier: MIT
++/*
++$info$
++tags: ir|opts
++desc: Moves a 32-bit guest's accesses below 128 MiB into the Horizon alias window
++$end_info$
++*/
++
++// A 39-bit Horizon process cannot map below 128 MiB, so Autorun gives a fixed-low
++// 32-bit game its low memory at window base + address instead, the base being a
++// power of two at or above 4 GiB. Every guest access whose whole address is below
++// 128 MiB gets the base added here, with shifts only (the x86 flags may be live
++// in NZCV); everything the guest can see -- ESP, ESI, EDI, the results of string
++// and stack operations -- stays a plain 32-bit address. An access this pass does
++// not know (gathers) faults below 128 MiB and is served by the native fallback
++// in Autorun's exception handler, slowly but correctly.
++
++#include "Interface/IR/IREmitter.h"
++#include "Interface/IR/PassManager.h"
++#include "Interface/IR/Passes.h"
++
++#include <FEXCore/Utils/Profiler.h>
++
++namespace FEXCore::IR {
++namespace {
++  constexpr uint8_t WindowBits = 27; // 128 MiB
++
++  class AliasWindow final : public Pass {
++  public:
++    explicit AliasWindow(uint8_t Shift)
++      : Shift(Shift) {}
++    void Run(IREmitter* Emit) override;
++
++  private:
++    const uint8_t Shift;
++    IREmitter* IREmit {};
++
++    Ref Inline(int64_t Value) {
++      return IREmit->_InlineConstant(Value);
++    }
++    // 1 when Address is below 128 MiB, else 0: (((Address >> 27) - 1) >> 63)
++    Ref InWindow(Ref Address) {
++      auto High = IREmit->_Lshr(OpSize::i64Bit, Address, Inline(WindowBits));
++      auto Low = IREmit->_Sub(OpSize::i64Bit, High, Inline(1));
++      return IREmit->_Lshr(OpSize::i64Bit, Low, Inline(63));
++    }
++    Ref Move(Ref Address, Ref Flag) {
++      return IREmit->_AddShift(OpSize::i64Bit, Address, Flag, ShiftType::LSL, Shift);
++    }
++    Ref Back(Ref Address, Ref Flag) {
++      return IREmit->_SubShift(OpSize::i64Bit, Address, Flag, ShiftType::LSL, Shift);
++    }
++    Ref Plus(Ref Address, int64_t Offset) {
++      if (Offset == 0) {
++        return Address;
++      }
++      if (Offset > 0 && Offset < 4096) {
++        return IREmit->_Add(OpSize::i64Bit, Address, Inline(Offset));
++      }
++      if (Offset < 0 && Offset > -4096) {
++        return IREmit->_Sub(OpSize::i64Bit, Address, Inline(-Offset));
++      }
++      return IREmit->_Add(OpSize::i64Bit, Address, IREmit->_Constant(Offset));
++    }
++    bool ConstantOf(const IRListView& IR, OrderedNodeWrapper Wrapper, int64_t* Value) {
++      auto* Op = IR.GetOp<IROp_Header>(Wrapper);
++      if (Op->Op == OP_INLINECONSTANT) {
++        *Value = Op->C<IROp_InlineConstant>()->Constant;
++        return true;
++      }
++      if (Op->Op == OP_CONSTANT) {
++        *Value = Op->C<IROp_Constant>()->Constant;
++        return true;
++      }
++      return false;
++    }
++
++    // Address argument AddrIndex is moved by where the access really goes:
++    // Address + Offset, Offset being an SSA argument (OffsetIndex) or a fixed one.
++    void MoveAddress(const IRListView& IR, Ref Node, IROp_Header* Op, size_t AddrIndex, int OffsetIndex = -1, int64_t Fixed = 0) {
++      Ref Address = IR.GetNode(Op->Args[AddrIndex]);
++      Ref Target = Plus(Address, Fixed);
++      if (OffsetIndex >= 0 && !Op->Args[OffsetIndex].IsInvalid()) {
++        int64_t Offset;
++        if (ConstantOf(IR, Op->Args[OffsetIndex], &Offset)) {
++          Target = Plus(Address, Offset + Fixed);
++        } else {
++          Target = IREmit->_Add(OpSize::i64Bit, Target, IR.GetNode(Op->Args[OffsetIndex]));
++        }
++      }
++      IREmit->ReplaceNodeArgument(Node, AddrIndex, Move(Address, InWindow(Target)));
++    }
++
++    // PUSH stores below ESP and returns the new ESP; its JIT form computes that
++    // ESP in 32 bits, which would drop the base, so it becomes a plain store.
++    void LowerPush(const IRListView& IR, Ref Node, const IROp_Push* Op) {
++      const auto Bytes = IR::OpSizeToSize(Op->ValueSize);
++      Ref NewSP = IREmit->_Sub(Op->Header.Size, IR.GetNode(Op->Addr), Inline(Bytes));
++      Ref Host = Move(NewSP, InWindow(NewSP));
++      IREmit->_StoreMem(RegClass::GPR, Op->ValueSize, IR.GetNode(Op->Value), Host, IREmit->Invalid(), OpSize::i8Bit, MemOffsetType::SXTX, 1);
++      IREmit->ReplaceUsesWithAfter(Node, NewSP, Node);
++      IREmit->Remove(Node);
++    }
++
++    // POP loads at ESP and moves ESP on in place; a load and an add instead.
++    void LowerPop(const IRListView& IR, Ref Node, const IROp_Pop* Op) {
++      Ref SP = IR.GetNode(Op->InoutAddr);
++      Ref Out = IR.GetNode(Op->OutValue);
++      Ref Value = IREmit->_LoadMem(RegClass::GPR, Op->Size, Move(SP, InWindow(SP)), IREmit->Invalid(), OpSize::i8Bit,
++                                   MemOffsetType::SXTX, 1);
++      Ref NewSP = IREmit->_Add(OpSize::i64Bit, SP, Inline(IR::OpSizeToSize(Op->Size)));
++      IREmit->ReplaceUsesWithAfter(Out, Value, Node);
++      IREmit->ReplaceUsesWithAfter(SP, NewSP, Node);
++      IREmit->Remove(Node);
++      if (Out->GetUses() == 0) {
++        IREmit->Remove(Out);
++      }
++    }
++  };
++
++  void AliasWindow::Run(IREmitter* Emit) {
++    FEXCORE_PROFILE_SCOPED("PassManager::AliasWindow");
++    IREmit = Emit;
++    auto IR = Emit->ViewIR();
++
++    for (auto [BlockNode, BlockHeader] : IR.GetBlocks()) {
++      IREmit->SetCurrentCodeBlock(BlockNode);
++      for (auto [Node, Op] : IR.GetCode(BlockNode)) {
++        IREmit->SetWriteCursorBefore(Node);
++        switch (Op->Op) {
++        case OP_LOADMEM:
++        case OP_STOREMEM:
++        case OP_LOADMEMTSO:
++        case OP_STOREMEMTSO: {
++          const size_t Addr = Op->Op == OP_LOADMEM ? IROp_LoadMem::Addr_Index :
++                              Op->Op == OP_STOREMEM ? IROp_StoreMem::Addr_Index :
++                              Op->Op == OP_LOADMEMTSO ? IROp_LoadMemTSO::Addr_Index : IROp_StoreMemTSO::Addr_Index;
++          MoveAddress(IR, Node, Op, Addr, Addr + 1);
++          break;
++        }
++        case OP_VLOADVECTORMASKED: MoveAddress(IR, Node, Op, IROp_VLoadVectorMasked::Addr_Index, IROp_VLoadVectorMasked::Offset_Index); break;
++        case OP_VSTOREVECTORMASKED: MoveAddress(IR, Node, Op, IROp_VStoreVectorMasked::Addr_Index, IROp_VStoreVectorMasked::Offset_Index); break;
++        case OP_PREFETCH: MoveAddress(IR, Node, Op, IROp_Prefetch::Addr_Index, IROp_Prefetch::Offset_Index); break;
++        case OP_STORESTACKMEM: MoveAddress(IR, Node, Op, IROp_StoreStackMem::Addr_Index, IROp_StoreStackMem::Offset_Index); break;
++        case OP_LOADMEMPAIR:
++          MoveAddress(IR, Node, Op, IROp_LoadMemPair::Addr_Index, -1, static_cast<int32_t>(Op->C<IROp_LoadMemPair>()->Offset));
++          break;
++        case OP_STOREMEMPAIR:
++          MoveAddress(IR, Node, Op, IROp_StoreMemPair::Addr_Index, -1, static_cast<int32_t>(Op->C<IROp_StoreMemPair>()->Offset));
++          break;
++        case OP_VLOADNONTEMPORAL: MoveAddress(IR, Node, Op, IROp_VLoadNonTemporal::Addr_Index, -1, Op->C<IROp_VLoadNonTemporal>()->Offset); break;
++        case OP_VSTORENONTEMPORAL: MoveAddress(IR, Node, Op, IROp_VStoreNonTemporal::Addr_Index, -1, Op->C<IROp_VStoreNonTemporal>()->Offset); break;
++        case OP_VSTORENONTEMPORALPAIR:
++          MoveAddress(IR, Node, Op, IROp_VStoreNonTemporalPair::Addr_Index, -1, Op->C<IROp_VStoreNonTemporalPair>()->Offset);
++          break;
++        case OP_LOADMEMX87SVEOPTPREDICATE: MoveAddress(IR, Node, Op, IROp_LoadMemX87SVEOptPredicate::Addr_Index); break;
++        case OP_STOREMEMX87SVEOPTPREDICATE: MoveAddress(IR, Node, Op, IROp_StoreMemX87SVEOptPredicate::Addr_Index); break;
++        case OP_VLOADVECTORELEMENT: MoveAddress(IR, Node, Op, IROp_VLoadVectorElement::Addr_Index); break;
++        case OP_VSTOREVECTORELEMENT: MoveAddress(IR, Node, Op, IROp_VStoreVectorElement::Addr_Index); break;
++        case OP_VBROADCASTFROMMEM: MoveAddress(IR, Node, Op, IROp_VBroadcastFromMem::Address_Index); break;
++        case OP_CACHELINECLEAR: MoveAddress(IR, Node, Op, IROp_CacheLineClear::Addr_Index); break;
++        case OP_CACHELINECLEAN: MoveAddress(IR, Node, Op, IROp_CacheLineClean::Addr_Index); break;
++        case OP_CACHELINEZERO: MoveAddress(IR, Node, Op, IROp_CacheLineZero::Addr_Index); break;
++        case OP_CAS: MoveAddress(IR, Node, Op, IROp_CAS::Addr_Index); break;
++        case OP_CASPAIR: MoveAddress(IR, Node, Op, IROp_CASPair::Addr_Index); break;
++        case OP_ATOMICSWAP: MoveAddress(IR, Node, Op, IROp_AtomicSwap::Addr_Index); break;
++        case OP_ATOMICFETCHADD: MoveAddress(IR, Node, Op, IROp_AtomicFetchAdd::Addr_Index); break;
++        case OP_ATOMICFETCHSUB: MoveAddress(IR, Node, Op, IROp_AtomicFetchSub::Addr_Index); break;
++        case OP_ATOMICFETCHAND: MoveAddress(IR, Node, Op, IROp_AtomicFetchAnd::Addr_Index); break;
++        case OP_ATOMICFETCHCLR: MoveAddress(IR, Node, Op, IROp_AtomicFetchCLR::Addr_Index); break;
++        case OP_ATOMICFETCHOR: MoveAddress(IR, Node, Op, IROp_AtomicFetchOr::Addr_Index); break;
++        case OP_ATOMICFETCHXOR: MoveAddress(IR, Node, Op, IROp_AtomicFetchXor::Addr_Index); break;
++        case OP_ATOMICFETCHNEG: MoveAddress(IR, Node, Op, IROp_AtomicFetchNeg::Addr_Index); break;
++        case OP_VALIDATECODE: MoveAddress(IR, Node, Op, IROp_ValidateCode::Address_Index); break;
++        case OP_MONOBACKPATCHERWRITE: MoveAddress(IR, Node, Op, IROp_MonoBackpatcherWrite::Addr_Index); break;
++        case OP_PUSH: LowerPush(IR, Node, Op->C<IROp_Push>()); break;
++        case OP_POP: LowerPop(IR, Node, Op->C<IROp_Pop>()); break;
++        case OP_MEMSET: {
++          // The JIT stores at Prefix + Addr and returns Addr moved on: the
++          // window's base joins the prefix and never reaches EDI.
++          const auto* Set = Op->C<IROp_MemSet>();
++          Ref Address = IR.GetNode(Set->Addr);
++          Ref Prefix = Set->Prefix.IsInvalid() ? nullptr : IR.GetNode(Set->Prefix);
++          Ref Flag = InWindow(Prefix ? IREmit->_Add(OpSize::i64Bit, Prefix, Address) : Address);
++          Ref Base = IREmit->_Lshl(OpSize::i64Bit, Flag, Inline(Shift));
++          IREmit->ReplaceNodeArgument(Node, IROp_MemSet::Prefix_Index, Prefix ? IREmit->_Add(OpSize::i64Bit, Prefix, Base) : Base);
++          break;
++        }
++        case OP_MEMCPY: {
++          // Both pointers go in moved and come out moved; ESI and EDI get them back.
++          const auto* Copy = Op->C<IROp_MemCpy>();
++          Ref Dest = IR.GetNode(Copy->Dest), Src = IR.GetNode(Copy->Src);
++          Ref OutDest = IR.GetNode(Copy->OutDstAddress), OutSrc = IR.GetNode(Copy->OutSrcAddress);
++          Ref DestFlag = InWindow(Dest), SrcFlag = InWindow(Src);
++          IREmit->ReplaceNodeArgument(Node, IROp_MemCpy::Dest_Index, Move(Dest, DestFlag));
++          IREmit->ReplaceNodeArgument(Node, IROp_MemCpy::Src_Index, Move(Src, SrcFlag));
++          IREmit->SetWriteCursor(Node);
++          Ref DestBack = Back(OutDest, DestFlag);
++          Ref SrcBack = Back(OutSrc, SrcFlag);
++          IREmit->ReplaceUsesWithAfter(OutDest, DestBack, SrcBack);
++          IREmit->ReplaceUsesWithAfter(OutSrc, SrcBack, SrcBack);
++          break;
++        }
++        default: break;
++        }
++      }
++    }
++  }
++} // namespace
++
++fextl::unique_ptr<Pass> CreateAliasWindowPass(uint8_t Shift) {
++  return fextl::make_unique<AliasWindow>(Shift);
++}
++} // namespace FEXCore::IR

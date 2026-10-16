@@ -3483,8 +3483,8 @@ static int runtime_program_needs_low( const char *program )
     return launcher_program_address_space( program ) == LAUNCHER_ADDRESS_LOW;
 }
 
-/* Whether a program goes through the alias window: set to Window, or Auto with a
- * fixed-low header (launcher.c, program_runs_in_window). */
+/* Whether a program goes through the alias window: 1 when set to Window, 2 for
+ * Auto with a fixed-low header (launcher.c, program_runs_in_window). */
 static int runtime_program_window( const char *program )
 {
     struct launcher_kv kv;
@@ -3497,7 +3497,7 @@ static int runtime_program_window( const char *program )
         launcher_settings_read( &kv, &settings );
         if (settings.address_space >= 0) return settings.address_space == 2;
     }
-    return launcher_program_address_space( program ) == LAUNCHER_ADDRESS_LOW;
+    return launcher_program_address_space( program ) == LAUNCHER_ADDRESS_LOW ? 2 : 0;
 }
 
 /* Leave the program in run-next.txt for Autorun 32-bit and ask the console for
@@ -4035,11 +4035,8 @@ int main( int argc, char **argv )
     /* Set to Window, or Auto with a fixed-low header, and room for the window:
      * only Box64 reaches it so far, whatever the game's CPU setting. */
     if (alias_window_available && !low_window_available && runtime_address_space_bits() == 39 &&
-        runtime_program_window( target ))
-    {
-        window_game = 1;
+        (window_game = runtime_program_window( target )))
         runtime_fex = 0;
-    }
     log_line( "[SYNC] %s", horizon_fast_sync_enabled ? "Horizon queued waits" : "Standard" );
     wine_nx_thread_configure_cores( runtime_four_cores );
     log_line( "[SDCACHE] %s", sd_cache ? "sdmc reads cached: 128 KB chunks, 8 per file, 32 to 192 MB in all"
@@ -4090,7 +4087,8 @@ int main( int argc, char **argv )
         uintptr_t base = wine_nx_alias_window_reserve();
 
         if (base && wine_nx_box64_set_window && wine_nx_box64_set_window( base ))
-            log_line( "[WINDOW] in use: guest addresses below 128 MiB live at %010llx", (unsigned long long)base );
+            log_line( "[WINDOW] in use (%s): guest addresses below 128 MiB live at %010llx",
+                      window_game == 2 ? "Auto, fixed-low header" : "set to Window", (unsigned long long)base );
         else
         {
             log_line( "[WINDOW] FAIL: no window for this game (base %010llx); it goes to Autorun 32-bit",

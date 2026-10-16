@@ -262,7 +262,7 @@ int wine_nx_alias_window_probe( void (*report)( const char * ) )
     report( message );
     if (execute_message[0]) report( execute_message );
     if (write_message[0]) report( write_message );
-    report( passed ? "[WINDOW] PASS: room for the alias window; fixed-low titles still go to Autorun 32-bit" :
+    report( passed ? "[WINDOW] PASS: room for the alias window; fixed-low titles run here through it" :
                      "[WINDOW] FAIL: the kernel refused pages in the alias window" );
     return passed;
 }
@@ -277,7 +277,7 @@ int wine_nx_low_window_probe( void (*report)( const char * ) )
     if (!low_window)
     {
         virtmemUnlock();
-        report( "[LOWVA] stock layout; fixed-low Win32 titles go to Autorun 32-bit" );
+        report( "[LOWVA] stock layout: the kernel gives no low addresses here" );
         return 0;
     }
     if (!reserved || !check_native_layout() || !check_guest_window())
