@@ -214,7 +214,8 @@ static NTSTATUS nx_create_stream(void *args)
     s->source_frame_bytes = p->fmt->nBlockAlign;
     s->ring_channels = max(2, s->source_channels);
     nx_init_matrix(s, nx_channel_mask(p->fmt));
-    s->scratch_bytes = (s->capacity * s->source_rate / NX_RATE + 2) * s->source_frame_bytes;
+    /* In 64 bits: two seconds at 48 kHz is already 96000 * 48000, past 32. */
+    s->scratch_bytes = ((UINT64)s->capacity * s->source_rate / NX_RATE + 2) * s->source_frame_bytes;
     s->ring = malloc(s->capacity * s->ring_channels * sizeof(short));
     bytes = s->scratch_bytes;
     /* Buffers exposed to a 32-bit client must reside below 4 GB. */
