@@ -13,7 +13,7 @@ int launcher_graphics_select( struct launcher_graphics *graphics, const struct u
                               unsigned short machine, int vkd3d, int combined,
                               enum dxvk_source *source, char version[32] );
 int launcher_graphics_ensure( struct launcher_graphics *graphics, unsigned short machine,
-                              int combined, enum dxvk_source source,
+                              int combined, enum dxvk_source *source,
                               char dxvk_version[32], char vkd3d_version[32] );
 
 #endif

@@ -90,6 +90,21 @@ int main(void)
     check_source( root, 0, DXVK_SOURCE_SAREK, 0x8664, "", "1.13.0", 1, 0 );
     check_source( root, 0, DXVK_SOURCE_GPLASYNC, 0x8664, "", "3.1.1-1", 1, 0 );
     check_source( root, 0, DXVK_SOURCE_GPLASYNC, 0x014c, "", "", 0, 0 );
+    {
+        /* What is on the card, when the build asked for is not: another build,
+         * and for DXVK + VKD3D only one VKD3D runs beside (not Sarek). */
+        enum dxvk_source found;
+        struct dxvk_version local;
+
+        assert( dxvk_find_installed( root, 0x014c, DXVK_SOURCE_GPLASYNC, 0, &found, &local ) );
+        assert( found == DXVK_SOURCE_OFFICIAL && !strcmp( local.version, "1.10" ) && local.installed );
+        dll( root, "dxvk-sarek/versions/1.13.0", "d3d9.dll", 0x014c );
+        assert( dxvk_find_installed( root, 0x014c, DXVK_SOURCE_SAREK, 0, &found, &local ) );
+        assert( found == DXVK_SOURCE_SAREK && !strcmp( local.version, "1.13.0" ) );
+        assert( !dxvk_find_installed( root, 0x014c, DXVK_SOURCE_GPLASYNC, 1, &found, &local ) && !local.installed );
+        assert( dxvk_find_installed( root, 0x8664, DXVK_SOURCE_SAREK, 1, &found, &local ) );
+        assert( found == DXVK_SOURCE_OFFICIAL && !strcmp( local.version, "3.1.1" ) );
+    }
 
     {
         static const char official[] = "[{\"tag_name\":\"v3.1.1\",\"draft\":false,\"prerelease\":false,"

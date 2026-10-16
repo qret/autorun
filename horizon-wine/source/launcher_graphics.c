@@ -327,21 +327,44 @@ static const struct dxvk_release *find_release( struct graphics_catalog *c, cons
     return NULL;
 }
 
+/* Without a network the release servers' answer never comes: what the card
+ * already has goes first. Another version of the build asked for, or another
+ * build (one VKD3D-Proton runs beside, for DXVK + VKD3D); the game's settings
+ * keep what is used. 1 when something on the card will do. */
+static int use_installed( struct launcher_graphics *g, unsigned short machine, int vkd3d, int combined,
+                          enum dxvk_source *source, char version[32] )
+{
+    struct dxvk_version selected;
+    enum dxvk_source found = *source;
+    char note[128];
+
+    if (vkd3d) vkd3d_resolve_version( g->root, machine, "", &selected );
+    else dxvk_find_installed( g->root, machine, *source, combined, &found, &selected );
+    if (!selected.installed) return 0;
+    snprintf( note, sizeof(note), "%s %s from the card", backend_name( vkd3d, found ), selected.version );
+    ui_toast( g->ui, note, 3000 );
+    *source = found;
+    strcpy( version, selected.version );
+    return 1;
+}
+
 static int ensure_backend( struct launcher_graphics *g, unsigned short machine, int vkd3d,
-                           int combined, enum dxvk_source source, char version[32] )
+                           int combined, enum dxvk_source *source_ptr, char version[32] )
 {
     struct graphics_catalog *c;
     struct dxvk_version selected;
     const struct dxvk_release *release;
+    enum dxvk_source source = *source_ptr;
 
     if (!vkd3d && combined)
     {
-        if (source == DXVK_SOURCE_SAREK) return 0;
+        if (source == DXVK_SOURCE_SAREK) source = *source_ptr = DXVK_SOURCE_OFFICIAL;
         if (version[0] && !launcher_dxvk_vkd3d_compatible( source, version )) version[0] = 0;
     }
     resolve_version( g, machine, vkd3d, source, version, &selected );
     if (!vkd3d && combined && !launcher_dxvk_vkd3d_compatible( source, selected.version ))
         selected.installed = 0;
+    if (!selected.installed && use_installed( g, machine, vkd3d, combined, source_ptr, version )) return 1;
     if (!selected.installed)
     {
         if (!(c = open_catalog( g, vkd3d, source ))) return 0;
@@ -365,8 +388,15 @@ static int ensure_backend( struct launcher_graphics *g, unsigned short machine, 
         }
         if (!release)
         {
-            ui_message( g->ui, backend_name( vkd3d, source ),
-                        dxvk_result_message( c->result == DXVK_OK ? DXVK_NOT_FOUND : c->result ) );
+            char text[384];
+            const char *base = vkd3d ? (machine == 0x014c ? "vkd3d" : "vkd3d64") : launcher_dxvk_directory( machine, source );
+
+            /* Unreachable servers are a fact of some networks: say where a release
+             * copied by hand is found, so the game needs no network at all. */
+            snprintf( text, sizeof(text), "%s\n\nWithout a network, copy a release to the card as "
+                      "switch/wine/drive_c/%s/versions/<version> and choose it again.",
+                      dxvk_result_message( c->result == DXVK_OK ? DXVK_NOT_FOUND : c->result ), base ? base : "dxvk" );
+            ui_message( g->ui, backend_name( vkd3d, source ), text );
             return 0;
         }
         if (!install_release( g, vkd3d, source, release )) return 0;
@@ -378,16 +408,18 @@ static int ensure_backend( struct launcher_graphics *g, unsigned short machine, 
 }
 
 int launcher_graphics_ensure( struct launcher_graphics *g, unsigned short machine,
-                              int combined, enum dxvk_source source,
+                              int combined, enum dxvk_source *source,
                               char dxvk_version[32], char vkd3d_version[32] )
 {
     char dxvk[32], vkd3d[32];
+    enum dxvk_source dxvk_source = *source, vkd3d_source = DXVK_SOURCE_OFFICIAL;
 
     if (!g) return 0;
     strcpy( dxvk, dxvk_version );
     strcpy( vkd3d, vkd3d_version );
-    if (!ensure_backend( g, machine, 0, combined, source, dxvk ) ||
-        (combined && !ensure_backend( g, machine, 1, 0, DXVK_SOURCE_OFFICIAL, vkd3d ))) return 0;
+    if (!ensure_backend( g, machine, 0, combined, &dxvk_source, dxvk ) ||
+        (combined && !ensure_backend( g, machine, 1, 0, &vkd3d_source, vkd3d ))) return 0;
+    *source = dxvk_source;
     strcpy( dxvk_version, dxvk );
     strcpy( vkd3d_version, vkd3d );
     return 1;

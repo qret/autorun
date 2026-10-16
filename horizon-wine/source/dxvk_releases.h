@@ -59,6 +59,11 @@ int dxvk_release_installed( enum dxvk_source source, const char *runtime_dir, un
 int dxvk_root_version( enum dxvk_source source, const char *runtime_dir, unsigned short machine, char *version, size_t size );
 void dxvk_resolve_version( enum dxvk_source source, const char *runtime_dir, unsigned short machine, const char *requested,
                            struct dxvk_version *selected );
+/* A DXVK already on the card, for a console that cannot reach the release
+ * servers: the newest of the preferred build, else of another; with
+ * vkd3d_compatible, only one VKD3D-Proton can run beside. 1 when found. */
+int dxvk_find_installed( const char *runtime_dir, unsigned short machine, enum dxvk_source preferred,
+                         int vkd3d_compatible, enum dxvk_source *source, struct dxvk_version *selected );
 const char *dxvk_result_message( enum dxvk_result result );
 
 enum dxvk_result vkd3d_release_catalog( const char *runtime_dir, struct dxvk_release *releases,

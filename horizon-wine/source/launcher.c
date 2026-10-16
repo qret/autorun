@@ -2077,7 +2077,7 @@ static int prepare_program_graphics( struct launcher *l, struct program *p )
     strcpy( vkd3d, p->settings.vkd3d_version );
     if (!launcher_graphics_ensure( l->graphics, p->machine,
                                   p->settings.d3d == LAUNCHER_D3D_DXVK_VKD3D,
-                                  p->settings.dxvk_source, dxvk, vkd3d )) return 0;
+                                  &p->settings.dxvk_source, dxvk, vkd3d )) return 0;
     strcpy( p->settings.dxvk_version, dxvk );
     strcpy( p->settings.vkd3d_version, vkd3d );
     return 1;

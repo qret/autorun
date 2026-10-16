@@ -1087,3 +1087,24 @@ void vkd3d_resolve_version( const char *runtime_dir, unsigned short machine, con
 {
     backend_resolve_version( &vkd3d_backend, runtime_dir, machine, requested, selected );
 }
+
+int dxvk_find_installed( const char *runtime_dir, unsigned short machine, enum dxvk_source preferred,
+                         int vkd3d_compatible, enum dxvk_source *source, struct dxvk_version *selected )
+{
+    static const enum dxvk_source others[] = { DXVK_SOURCE_OFFICIAL, DXVK_SOURCE_GPLASYNC, DXVK_SOURCE_SAREK };
+    int i;
+
+    for (i = -1; i < (int)(sizeof(others) / sizeof(others[0])); i++)
+    {
+        enum dxvk_source candidate = i < 0 ? preferred : others[i];
+
+        if (i >= 0 && candidate == preferred) continue;
+        dxvk_resolve_version( candidate, runtime_dir, machine, "", selected );
+        if (!selected->installed) continue;
+        if (vkd3d_compatible && !launcher_dxvk_vkd3d_compatible( candidate, selected->version )) continue;
+        *source = candidate;
+        return 1;
+    }
+    memset( selected, 0, sizeof(*selected) );
+    return 0;
+}
