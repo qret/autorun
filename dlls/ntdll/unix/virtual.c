@@ -7521,7 +7521,28 @@ NTSTATUS WINAPI NtQueryVirtualMemory( HANDLE process, LPCVOID addr,
     TRACE("(%p, %p, info_class=%d, %p, %ld, %p)\n",
           process, addr, info_class, buffer, len, res_len);
 #ifdef __SWITCH__
-    if (process == NtCurrentProcess()) addr = window_address( addr );
+    if (process == NtCurrentProcess() && window_address( addr ) != addr)
+    {
+        /* The guest asked about its own address in the alias window: the answer
+         * is in its addresses too, so it and FEX (which keeps its executable
+         * ranges by them) see the image where the game runs it. */
+        char *window = (char *)window_address( addr ) - (ULONG_PTR)addr;
+
+        addr = window_address( addr );
+        if (info_class == MemoryBasicInformation)
+        {
+            MEMORY_BASIC_INFORMATION *info = buffer;
+
+            if (!(status = get_basic_memory_info( process, addr, buffer, len, res_len )))
+            {
+                if ((char *)info->BaseAddress >= window && (char *)info->BaseAddress < window + 0x8000000)
+                    info->BaseAddress = (char *)info->BaseAddress - (ULONG_PTR)window;
+                if ((char *)info->AllocationBase >= window && (char *)info->AllocationBase < window + 0x8000000)
+                    info->AllocationBase = (char *)info->AllocationBase - (ULONG_PTR)window;
+            }
+            return status;
+        }
+    }
 #endif
 
     switch(info_class)

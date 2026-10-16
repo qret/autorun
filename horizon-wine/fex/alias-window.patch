@@ -339,7 +339,7 @@ index 0000000..4a8d08e
 +}
 +} // namespace FEXCore::IR
 diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
-index 05e14a0..8a53c5d 100644
+index 05e14a0..8765137 100644
 --- a/Source/Windows/WOW64/Module.cpp
 +++ b/Source/Windows/WOW64/Module.cpp
 @@ -9,6 +9,10 @@ $end_info$
@@ -353,7 +353,22 @@ index 05e14a0..8a53c5d 100644
  #include <FEXCore/Core/X86Enums.h>
  #include <FEXCore/Core/SignalDelegator.h>
  #include <FEXCore/Core/Context.h>
-@@ -910,6 +914,15 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
+@@ -180,6 +184,14 @@ bool IsAddressInJit(uint64_t Address) {
+ }
+ 
+ void HandleImageMap(uint64_t Address, bool MainImage = false) {
++#ifdef FEX_HORIZON_ALIAS_WINDOW
++  // An image in Autorun's alias window -- a fixed-low game, whose base the 64-bit
++  // PEB records at the window's base + its address -- runs, and is tracked, at
++  // the address the game knows.
++  if (const auto Base = WineNX::FEX::AliasWindowBase(); Base && Address >= Base && Address < Base + 0x8000000) {
++    Address -= Base;
++  }
++#endif
+   fextl::string ModulePath = FEX::Windows::GetSectionFilePath(Address);
+   fextl::string ModuleName = fextl::string {FEX::Windows::BaseName(ModulePath)};
+   InvalidationTracker->HandleImageMap(ModuleName, Address);
+@@ -910,6 +922,15 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
      Thread && Thread->ThreadStats ? &Thread->ThreadStats->AccumulatedSignalTime : nullptr);
  
    if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
