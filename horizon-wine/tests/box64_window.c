@@ -200,6 +200,28 @@ int main(void)
         assert( image[0x105c] == 0x11 && data( 0x70 ) == 0x11443322 && data( 0x74 ) == 0x40105b );
         assert( context.Esi == 0x401059 && context.Edi == 0x40105b && context.Ecx == 5 );
     }
+    {
+        /* BT with a register adds the bit offset's byte part to the operand. */
+        static const unsigned char bits[] = {
+            0xbb,0x00,0x10,0x40,0x00,        /* mov ebx, 0x401000 */
+            0xb9,0x22,0x00,0x00,0x00,        /* mov ecx, 34                bit 2 of [ebx+4] */
+            0x0f,0xa3,0x0b,                  /* bt [ebx], ecx */
+            0x0f,0x92,0xc0,                  /* setc al */
+            0xa2,0x80,0x10,0x40,0x00,        /* mov [0x401080], al */
+            0xb9,0x28,0x00,0x00,0x00,        /* mov ecx, 40                bit 0 of [ebx+5] */
+            0xf0,0x0f,0xab,0x0b,             /* lock bts [ebx], ecx */
+            0xba,0x00,0x1f,0x40,0x00,        /* mov edx, DONE */
+            0xff,0xe2                        /* jmp edx */
+        };
+
+        memcpy( image + 0x300, bits, sizeof(bits) );
+        memcpy( image + 0x1000, values, sizeof(values) );
+        image[0x1080] = 0;
+        init_context( &context, IMAGE + 0x300, STACK + 0x6000 );
+        status = wine_nx_box64_run( &context, STACK + 0x3000, &gates, &host, NULL, DONE, 1000, &executed );
+        printf( "bits: status=%08x [80]=%u [4]=%#x\n", (unsigned)status, image[0x1080], (unsigned)data( 4 ) );
+        assert( status == STATUS_SUCCESS && image[0x1080] == 1 && data( 4 ) == 0x105 );
+    }
 #ifdef WINE_NX_BOX64_DYNAREC
     {
         /* The window code ran translated, not handed to the interpreter. */
@@ -210,6 +232,6 @@ int main(void)
         assert( wine_nx_box64_dynarec_bytes > 0 && wine_nx_box64_native_entries > 0 );
     }
 #endif
-    puts( "Alias window: operands, read-modify-write, LEA, a call, changed code, string instructions, moffs and XLAT passed" );
+    puts( "Alias window: operands, read-modify-write, LEA, a call, changed code, string instructions, moffs, XLAT and BT passed" );
     return 0;
 }

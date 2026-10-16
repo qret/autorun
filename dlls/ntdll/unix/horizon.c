@@ -64,6 +64,7 @@
 #include "horizon_threads.h"
 #include "horizon_registry.h"
 #include "horizon_read_redirect.h"
+#include "horizon_window_redirect.h"
 #include "horizon_object_dirs.h"
 #include "horizon_nsi.h"
 #include "horizon_keyboard.h"
@@ -16832,6 +16833,68 @@ static BOOL horizon_redirect_user_shared_data( ThreadExceptionDump *ctx )
     return TRUE;
 }
 
+/* The alias window (low_window.c): a fixed-low guest image lives at base + g,
+ * and translated code adds the base itself. Native code handed a guest pointer
+ * below 128 MiB faults on it; serve the access from base + g and carry on. The
+ * base is Box64's, 0 while no window is in use. Every access costs an exception,
+ * so the log shows how often it happens; a pointer that should have been
+ * translated where it crossed into native code shows up here. */
+extern uintptr_t wine_nx_box64_window_base __attribute__((weak));
+static __thread struct horizon_exclusive horizon_window_exclusive;
+
+static int horizon_window_page_access( unsigned long long address, unsigned long long size, int write )
+{
+    unsigned long long end = address + size;
+
+    while (address < end)
+    {
+        MemoryInfo info;
+        u32 page_info;
+
+        if (R_FAILED( svcQueryMemory( &info, &page_info, address ) ) || info.type == MemType_Unmapped ||
+            !(info.perm & Perm_R) || (write && !(info.perm & Perm_W)))
+            return 0;
+        address = info.addr + info.size;
+    }
+    return 1;
+}
+
+static BOOL horizon_redirect_alias_window( ThreadExceptionDump *ctx )
+{
+    static unsigned int count;
+    unsigned long long base = &wine_nx_box64_window_base ? wine_nx_box64_window_base : 0;
+    unsigned int exception_class = ctx->esr >> 26, i;
+    struct horizon_read_regs regs;
+    char buf[160];
+
+    if (!base || (exception_class != 0x24 && exception_class != 0x25) || (ctx->esr & (1u << 10)) ||
+        ctx->far.x < 0x10000 || ctx->far.x >= 0x8000000)
+        return FALSE;
+    for (i = 0; i < 29; i++) regs.x[i] = ctx->cpu_gprs[i].x;
+    regs.x[29] = ctx->fp.x;
+    regs.x[30] = ctx->lr.x;
+    regs.sp = ctx->sp.x;
+    regs.pc = ctx->pc.x;
+    for (i = 0; i < 32; i++) regs.v[i] = ctx->fpu_gprs[i].v;
+    if (!horizon_redirect_window( &regs, *(const u32 *)(ULONG_PTR)ctx->pc.x, base, 0x8000000,
+                                  &horizon_window_exclusive, horizon_window_page_access ))
+        return FALSE;
+    count++;
+    if (!(count & (count - 1)))
+    {
+        snprintf( buf, sizeof(buf), "[WINDOW] %u native accesses served in the alias window; last 0x%llx at pc=0x%llx",
+                  count, (unsigned long long)ctx->far.x, (unsigned long long)ctx->pc.x );
+        wine_nx_runtime_trace( buf );
+    }
+    for (i = 0; i < 29; i++) ctx->cpu_gprs[i].x = regs.x[i];
+    ctx->fp.x = regs.x[29];
+    ctx->lr.x = regs.x[30];
+    ctx->sp.x = regs.sp;
+    ctx->pc.x = regs.pc;
+    for (i = 0; i < 32; i++) ctx->fpu_gprs[i].v = regs.v[i];
+    return TRUE;
+}
+
 /*
  * Horizon takes user access away from whole pages while it is using them.
  *
@@ -16907,6 +16970,7 @@ void __libnx_exception_handler( ThreadExceptionDump *ctx )
     }
 #endif
     if (horizon_redirect_user_shared_data( ctx )) horizon_resume_exception( ctx );
+    if (horizon_redirect_alias_window( ctx )) horizon_resume_exception( ctx );
     /* A translated RET returned natively into a block Box64 marked as possibly
      * changed, onto an undefined instruction: resume after the mark or at the
      * dynarec's epilog. Both through x9, as x17 holds the guest's EDI there.
